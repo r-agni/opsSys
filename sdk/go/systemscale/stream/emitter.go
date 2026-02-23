@@ -4,6 +4,7 @@ package stream
 import (
 	"bytes"
 	"context"
+	crand "crypto/rand"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -196,7 +197,7 @@ func (e *StreamEmitter) postWithRetry(ctx context.Context, u string, body []byte
 			if ctx.Err() != nil {
 				return false
 			}
-			time.Sleep(delay)
+			time.Sleep(jitteredDelay(delay))
 			delay *= 2
 			continue
 		}
@@ -205,6 +206,13 @@ func (e *StreamEmitter) postWithRetry(ctx context.Context, u string, body []byte
 		return resp.StatusCode >= 200 && resp.StatusCode < 300
 	}
 	return false
+}
+
+func jitteredDelay(d time.Duration) time.Duration {
+	var b [1]byte
+	crand.Read(b[:]) //nolint:errcheck
+	jitter := time.Duration(float64(d) * (float64(b[0])/512.0 - 0.25))
+	return d + jitter
 }
 
 // ServiceName returns the resolved service name (hostname fallback).

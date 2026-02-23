@@ -330,7 +330,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /v1/keys", protect(http.HandlerFunc(s.handleListKeys)))
 	mux.Handle("DELETE /v1/keys/{id}", protect(http.HandlerFunc(s.handleRevokeKey)))
 
-	return corsMiddleware(mux)
+	return auth.RequestIDMiddleware(corsMiddleware(mux))
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +408,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(5 * time.Minute)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -435,7 +438,11 @@ func main() {
 		slog.Error("auth signer init", "err", err)
 		os.Exit(1)
 	}
-	slog.Info("ephemeral RSA signer ready")
+	if os.Getenv("RSA_KEY_PATH") != "" {
+		slog.Info("persistent RSA signer loaded", "path", os.Getenv("RSA_KEY_PATH"))
+	} else {
+		slog.Warn("using ephemeral RSA signer — tokens will not survive restarts. Set RSA_KEY_PATH for production.")
+	}
 
 	srv := &server{
 		db:        db,

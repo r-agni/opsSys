@@ -1,0 +1,85 @@
+# Page snapshot
+
+```yaml
+- generic [ref=e3]:
+  - navigation [ref=e4]:
+    - generic [ref=e5]:
+      - img [ref=e6]
+      - generic [ref=e11]: SystemScale
+    - list [ref=e12]:
+      - listitem [ref=e13]:
+        - link "Projects" [ref=e14] [cursor=pointer]:
+          - /url: /
+          - img [ref=e16]
+          - text: Projects
+      - listitem [ref=e21]:
+        - link "Team" [ref=e22] [cursor=pointer]:
+          - /url: /team
+          - img [ref=e24]
+          - text: Team
+      - listitem [ref=e29]:
+        - link "API Keys" [ref=e30] [cursor=pointer]:
+          - /url: /settings/api-keys
+          - img [ref=e32]
+          - text: API Keys
+    - generic [ref=e35]:
+      - generic [ref=e36]:
+        - generic [ref=e37]: RW
+        - generic [ref=e38]:
+          - generic [ref=e39]: ragni.works@gmail.com
+          - generic [ref=e40]: admin
+      - button "Sign out" [ref=e41] [cursor=pointer]:
+        - img [ref=e42]
+        - text: Sign out
+  - generic [ref=e44]:
+    - banner [ref=e45]:
+      - generic [ref=e46]: Projects
+      - 'generic "WebSocket: Disconnected" [ref=e47]':
+        - generic [ref=e49]: Disconnected
+    - main [ref=e50]:
+      - generic [ref=e51]:
+        - generic [ref=e52]:
+          - heading "Projects" [level=2] [ref=e53]
+          - button "+ New Project" [ref=e54] [cursor=pointer]
+        - generic [ref=e55]:
+          - generic [ref=e56] [cursor=pointer]:
+            - generic [ref=e57]: Dashboard Test dash-test-1393
+            - generic [ref=e58]:
+              - generic [ref=e59]: 2 devices
+              - generic [ref=e60]: 2/23/2026
+          - generic [ref=e61] [cursor=pointer]:
+            - generic [ref=e62]: Realtime Test
+            - generic [ref=e63]:
+              - generic [ref=e64]: 1 device
+              - generic [ref=e65]: 2/23/2026
+          - generic [ref=e66] [cursor=pointer]:
+            - generic [ref=e67]: drone-fleet
+            - generic [ref=e68]:
+              - generic [ref=e69]: 3 devices
+              - generic [ref=e70]: 2/23/2026
+          - generic [ref=e71] [cursor=pointer]:
+            - generic [ref=e72]: E2E Fleet Test
+            - generic [ref=e73]:
+              - generic [ref=e74]: 1 device
+              - generic [ref=e75]: 2/23/2026
+          - generic [ref=e76] [cursor=pointer]:
+            - generic [ref=e77]: Realtime Test
+            - generic [ref=e78]:
+              - generic [ref=e79]: 1 device
+              - generic [ref=e80]: 2/23/2026
+          - generic [ref=e81] [cursor=pointer]:
+            - generic [ref=e82]: Dashboard Test dash-test-2993
+            - generic [ref=e83]:
+              - generic [ref=e84]: 2 devices
+              - generic [ref=e85]: 2/23/2026
+          - generic [ref=e86] [cursor=pointer]:
+            - generic [ref=e87]: Dashboard Test dash-test-2891
+            - generic [ref=e88]:
+              - generic [ref=e89]: 2 devices
+              - generic [ref=e90]: 2/23/2026
+          - generic [ref=e91] [cursor=pointer]:
+            - generic [ref=e92]: Dashboard Test dash-test-2872
+            - generic [ref=e93]:
+              - generic [ref=e94]: 2 devices
+              - generic [ref=e95]: 2/23/2026
+```

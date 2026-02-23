@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import random
 import threading
 import time
 from dataclasses import dataclass
@@ -221,8 +222,9 @@ class MessageReceiver:
             except Exception as e:
                 if self._stopped:
                     break
-                logger.warning("SSE disconnected (%s) — reconnecting in %.1fs", e, backoff)
-                time.sleep(backoff)
+                jittered = backoff + random.uniform(0, backoff * 0.5)
+                logger.warning("SSE disconnected (%s) — reconnecting in %.1fs", e, jittered)
+                time.sleep(jittered)
                 backoff = min(backoff * 2, 10.0)
 
     def _consume_sse(self, resp: Any) -> None:

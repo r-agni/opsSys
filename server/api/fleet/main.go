@@ -109,9 +109,23 @@ type keycloakClient struct {
 	clientID     string
 	clientSecret string
 
+	httpClient  *http.Client
+
 	mu          sync.Mutex
 	accessToken string
 	expiry      time.Time
+}
+
+func newKeycloakClient(baseURL, realm, clientID, clientSecret string) *keycloakClient {
+	return &keycloakClient{
+		baseURL:      baseURL,
+		realm:        realm,
+		clientID:     clientID,
+		clientSecret: clientSecret,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+	}
 }
 
 func (kc *keycloakClient) token(ctx context.Context) (string, error) {
@@ -135,7 +149,7 @@ func (kc *keycloakClient) token(ctx context.Context) (string, error) {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := kc.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("keycloak token fetch: %w", err)
 	}
@@ -696,7 +710,7 @@ func (s *server) handleListOrgMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.kc.httpClient.Do(req)
 	if err != nil {
 		slog.Error("keycloak list users", "err", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -794,7 +808,7 @@ func (s *server) handleInviteMember(w http.ResponseWriter, r *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.kc.httpClient.Do(req)
 	if err != nil {
 		slog.Error("keycloak create user", "err", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -870,7 +884,7 @@ func (s *server) handleUpdateMemberAccess(w http.ResponseWriter, r *http.Request
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.kc.httpClient.Do(req)
 	if err != nil {
 		slog.Error("keycloak update user", "err", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -932,7 +946,7 @@ func (s *server) handleDeleteMember(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.kc.httpClient.Do(req)
 	if err != nil {
 		slog.Error("keycloak delete user", "err", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -959,7 +973,7 @@ func (s *server) kcGetUser(ctx context.Context, token, userID string) (*kcUser, 
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.kc.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1007,7 +1021,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("PUT /v1/org/members/{userId}/access", protect(http.HandlerFunc(s.handleUpdateMemberAccess)))
 	mux.Handle("DELETE /v1/org/members/{userId}", protect(http.HandlerFunc(s.handleDeleteMember)))
 
-	return corsMiddleware(mux)
+	return auth.RequestIDMiddleware(corsMiddleware(mux))
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,6 +1070,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(5 * time.Minute)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -1081,12 +1098,7 @@ func main() {
 	srv := &server{
 		db:        db,
 		validator: validator,
-		kc: &keycloakClient{
-			baseURL:      cfg.KeycloakURL,
-			realm:        cfg.KeycloakRealm,
-			clientID:     cfg.KeycloakClientID,
-			clientSecret: cfg.KeycloakClientSecret,
-		},
+		kc:        newKeycloakClient(cfg.KeycloakURL, cfg.KeycloakRealm, cfg.KeycloakClientID, cfg.KeycloakClientSecret),
 	}
 
 	httpServer := &http.Server{

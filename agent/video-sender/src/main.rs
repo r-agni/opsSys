@@ -75,6 +75,9 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use tracing::{error, info};
 
+#[cfg(feature = "gstreamer-runtime")]
+use {std::time::Duration, tracing::warn};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Configuration
 // ─────────────────────────────────────────────────────────────────────────────
@@ -177,56 +180,132 @@ async fn main() -> Result<()> {
     let cfg = VideoConfig::load()?;
     info!(vehicle_id = %cfg.vehicle_id, "SystemScale video sender starting");
 
-    let pipeline_str = cfg.pipeline()?;
-    info!("GStreamer pipeline:\n  gst-launch-1.0 {}", pipeline_str);
+    #[cfg(feature = "gstreamer-runtime")]
+    {
+        gstreamer::init().context("GStreamer initialization failed")?;
+        info!("GStreamer runtime initialized");
+        run_pipeline_loop(&cfg).await?;
+    }
 
-    // ── NOT YET IMPLEMENTED ──────────────────────────────────────────────────
-    //
-    // To launch the GStreamer pipeline from Rust, add the `gstreamer` crate:
-    //
-    //   [dependencies]
-    //   gstreamer = "0.23"
-    //   gstreamer-app = "0.23"
-    //
-    // Then:
-    //   gstreamer::init()?;
-    //   let pipeline = gstreamer::parse::launch(&pipeline_str)?;
-    //   let bus = pipeline.bus().unwrap();
-    //   pipeline.set_state(gstreamer::State::Playing)?;
-    //   for msg in bus.iter_timed(gstreamer::ClockTime::NONE) {
-    //       use gstreamer::MessageView::*;
-    //       match msg.view() {
-    //           Eos(..)   => { info!("EOS"); break; }
-    //           Error(e)  => { error!("{}", e.error()); break; }
-    //           _         => {}
-    //       }
-    //   }
-    //   pipeline.set_state(gstreamer::State::Null)?;
-    //
-    // The GStreamer crate requires GStreamer system libraries installed on the
-    // vehicle (see module-level doc comment for apt install commands).
-    // For Jetson: the nvv4l2h265enc plugin ships with JetPack; no extra install.
-    //
-    // ─────────────────────────────────────────────────────────────────────────
-    //
-    // In the meantime, you can run the pipeline directly with gst-launch-1.0:
-    //
-    //   gst-launch-1.0 <pipeline>
-    //
-    // Or spawn it from a shell script / systemd ExecStart. The process exits on
-    // pipeline error; systemd Restart=always will relaunch it automatically.
-
-    error!(
-        "GStreamer integration not yet compiled in. \
-         Run the pipeline manually with gst-launch-1.0, or add the \
-         `gstreamer` crate and implement the pipeline loop above."
-    );
-
-    // Print the ready-to-run shell command so operators can start streaming
-    // immediately without waiting for the Rust GStreamer binding.
-    println!("\nTo start video streaming now, run:");
-    println!("  gst-launch-1.0 {pipeline_str}");
-    println!("\nTo run as a service, use the systemd unit from docs/hardware-integration.md.");
+    #[cfg(not(feature = "gstreamer-runtime"))]
+    {
+        let pipeline_str = cfg.pipeline()?;
+        error!(
+            "Built without gstreamer-runtime feature. \
+             Rebuild with: cargo build --features gstreamer-runtime"
+        );
+        println!("\nTo start video streaming manually, run:");
+        println!("  gst-launch-1.0 {pipeline_str}");
+    }
 
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GStreamer pipeline runner (compiled only with the gstreamer-runtime feature)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "gstreamer-runtime")]
+enum PipelineOutcome {
+    Eos,
+    Error(String),
+    Shutdown,
+}
+
+/// Runs the GStreamer pipeline in a loop with exponential backoff on errors.
+/// Gracefully shuts down on SIGINT/SIGTERM (ctrl-c).
+#[cfg(feature = "gstreamer-runtime")]
+async fn run_pipeline_loop(cfg: &VideoConfig) -> Result<()> {
+    let mut backoff = Duration::from_secs(1);
+    const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+    loop {
+        let pipeline_str = cfg.pipeline()?;
+        info!("Pipeline: gst-launch-1.0 {pipeline_str}");
+
+        let pipeline = gstreamer::parse::launch(&pipeline_str)
+            .context("Failed to parse GStreamer pipeline")?;
+
+        let pipeline = pipeline
+            .downcast::<gstreamer::Pipeline>()
+            .map_err(|_| anyhow::anyhow!("Parsed element is not a Pipeline"))?;
+
+        pipeline
+            .set_state(gstreamer::State::Playing)
+            .context("Failed to set pipeline to Playing")?;
+        info!("Pipeline PLAYING");
+
+        let bus = pipeline.bus().context("Pipeline has no bus")?;
+
+        let outcome = {
+            let bus_clone = bus.clone();
+            let bus_handle =
+                tokio::task::spawn_blocking(move || watch_bus(&bus_clone));
+
+            tokio::select! {
+                result = bus_handle => {
+                    result.context("Bus watcher task panicked")?
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received shutdown signal");
+                    PipelineOutcome::Shutdown
+                }
+            }
+        };
+
+        let _ = pipeline.set_state(gstreamer::State::Null);
+
+        match outcome {
+            PipelineOutcome::Shutdown => {
+                info!("Video sender stopped");
+                return Ok(());
+            }
+            PipelineOutcome::Eos => {
+                info!("End-of-stream — restarting pipeline");
+                backoff = Duration::from_secs(1);
+            }
+            PipelineOutcome::Error(msg) => {
+                error!("Pipeline error: {msg}");
+                warn!("Restarting in {backoff:?}");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+            }
+        }
+    }
+}
+
+/// Blocks on the GStreamer bus, returning when EOS or Error is received.
+/// Called inside `spawn_blocking` so it doesn't block the tokio runtime.
+#[cfg(feature = "gstreamer-runtime")]
+fn watch_bus(bus: &gstreamer::Bus) -> PipelineOutcome {
+    use gstreamer::MessageView;
+
+    loop {
+        let msg = match bus.timed_pop(gstreamer::ClockTime::from_seconds(2)) {
+            Some(msg) => msg,
+            None => continue,
+        };
+
+        match msg.view() {
+            MessageView::Eos(..) => {
+                return PipelineOutcome::Eos;
+            }
+            MessageView::Error(e) => {
+                let err = e.error().to_string();
+                let debug = e
+                    .debug()
+                    .map(|d| d.to_string())
+                    .unwrap_or_default();
+                return if debug.is_empty() {
+                    PipelineOutcome::Error(err)
+                } else {
+                    PipelineOutcome::Error(format!("{err} ({debug})"))
+                };
+            }
+            MessageView::Warning(w) => {
+                warn!(msg = %w.error(), "GStreamer warning");
+            }
+            _ => {}
+        }
+    }
 }

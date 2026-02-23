@@ -714,7 +714,7 @@ func (c *Client) runCommandListener() {
 			select {
 			case <-c.ctx.Done():
 				return
-			case <-time.After(backoff):
+			case <-time.After(jitteredDelay(backoff)):
 			}
 			backoff = time.Duration(math.Min(float64(backoff*2), float64(maxBack)))
 		} else {
@@ -869,7 +869,7 @@ func (c *Client) postACK(commandID, status, message string) error {
 }
 
 // postWithRetry POSTs body to u and returns true on HTTP 2xx.
-// Uses exponential backoff (50ms base) across maxRetries attempts.
+// Uses exponential backoff with jitter across maxRetries attempts.
 func (c *Client) postWithRetry(u string, body []byte, maxRetries int) bool {
 	delay := 50 * time.Millisecond
 	for i := 0; i < maxRetries; i++ {
@@ -883,7 +883,7 @@ func (c *Client) postWithRetry(u string, body []byte, maxRetries int) bool {
 			if c.ctx.Err() != nil {
 				return false
 			}
-			time.Sleep(delay)
+			time.Sleep(jitteredDelay(delay))
 			delay *= 2
 			continue
 		}
@@ -896,4 +896,12 @@ func (c *Client) postWithRetry(u string, body []byte, maxRetries int) bool {
 		return false
 	}
 	return false
+}
+
+// jitteredDelay returns d ± 25% random jitter to prevent thundering herd.
+func jitteredDelay(d time.Duration) time.Duration {
+	var b [1]byte
+	rand.Read(b[:]) //nolint:errcheck
+	jitter := time.Duration(float64(d) * (float64(b[0])/512.0 - 0.25))
+	return d + jitter
 }

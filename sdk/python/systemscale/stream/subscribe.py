@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import random
 import threading
 import time
 import urllib.parse
@@ -77,6 +78,8 @@ class StreamSubscriber:
         """
         Blocking generator yielding real-time frames from the ws-gateway.
 
+        Automatically reconnects on disconnection with exponential backoff.
+
         :param service:    Service name to subscribe to (None = all in project).
         :param streams:    Stream types, e.g. ``["telemetry", "event"]``.
         :param from_actor: Only yield frames originating from this actor
@@ -103,24 +106,6 @@ class StreamSubscriber:
 
         frame_q: queue.Queue = queue.Queue(maxsize=4096)
 
-        def on_message(ws: Any, message: Any) -> None:
-            if not frame_q.full():
-                frame_q.put_nowait(message)
-
-        token  = exchange_token(self._api_key, self._apikey_url)
-        ws_url = f"{self._ws_url}?token={urllib.parse.quote(token)}"
-        ws     = websocket.WebSocketApp(
-            ws_url,
-            on_message=on_message,
-            on_error=lambda ws, e: logger.warning("WS error: %s", e),
-        )
-        ws_thread = threading.Thread(
-            target=ws.run_forever, kwargs={"ping_interval": 30}, daemon=True
-        )
-        ws_thread.start()
-        time.sleep(0.5)
-        ws.send(sub_msg)
-
         # Parse "type:id" from_actor filter
         filter_type: str | None = None
         filter_id:   str | None = None
@@ -129,35 +114,79 @@ class StreamSubscriber:
             filter_type = at  or None
             filter_id   = aid or None
 
+        self._ws_stopped = False
+        backoff = 0.5
+
         try:
-            while True:
-                try:
-                    raw = frame_q.get(timeout=1.0)
-                except queue.Empty:
-                    continue
-                if not isinstance(raw, str):
-                    continue
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
+            while not self._ws_stopped:
+                ws_ref: list = [None]
 
-                # Apply from_actor filter
-                if filter_type:
-                    if data.get("sender_type", "") != filter_type:
-                        continue
-                if filter_id and filter_id != "*":
-                    if data.get("sender_id", "") != filter_id:
-                        continue
+                def on_message(ws: Any, message: Any) -> None:
+                    if not frame_q.full():
+                        frame_q.put_nowait(message)
 
-                yield DataFrame(
-                    service   = data.get("vehicle_id", data.get("device", "")),
-                    stream    = data.get("type", "event"),
-                    timestamp = str(data.get("ts", "")),
-                    fields    = data,
+                def on_error(ws: Any, e: Any) -> None:
+                    logger.warning("WS error: %s", e)
+
+                def on_close(ws: Any, code: Any, msg: Any) -> None:
+                    logger.info("WS closed (code=%s)", code)
+
+                token  = exchange_token(self._api_key, self._apikey_url)
+                ws_url = f"{self._ws_url}?token={urllib.parse.quote(token)}"
+                ws     = websocket.WebSocketApp(
+                    ws_url,
+                    on_message=on_message,
+                    on_error=on_error,
+                    on_close=on_close,
                 )
+                ws_ref[0] = ws
+
+                ws_thread = threading.Thread(
+                    target=ws.run_forever, kwargs={"ping_interval": 30}, daemon=True
+                )
+                ws_thread.start()
+                time.sleep(0.5)
+                try:
+                    ws.send(sub_msg)
+                except Exception:
+                    pass
+                backoff = 0.5
+
+                while ws_thread.is_alive() and not self._ws_stopped:
+                    try:
+                        raw = frame_q.get(timeout=1.0)
+                    except queue.Empty:
+                        continue
+                    if not isinstance(raw, str):
+                        continue
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if filter_type:
+                        if data.get("sender_type", "") != filter_type:
+                            continue
+                    if filter_id and filter_id != "*":
+                        if data.get("sender_id", "") != filter_id:
+                            continue
+
+                    yield DataFrame(
+                        service   = data.get("vehicle_id", data.get("device", "")),
+                        stream    = data.get("type", "event"),
+                        timestamp = str(data.get("ts", "")),
+                        fields    = data,
+                    )
+
+                if not self._ws_stopped:
+                    jittered = backoff + random.uniform(0, backoff * 0.5)
+                    logger.warning("WS disconnected — reconnecting in %.1fs", jittered)
+                    time.sleep(jittered)
+                    backoff = min(backoff * 2, 30.0)
         finally:
-            ws.close()
+            self._ws_stopped = True
+            if ws_ref[0]:
+                ws_ref[0].close()
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 

@@ -4,10 +4,12 @@ package router
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/systemscale/services/shared/auth"
 )
 
 // NATSRouter implements MessageRouter backed by NATS JetStream.
@@ -60,7 +62,9 @@ func (r *NATSRouter) Publish(ctx context.Context, subject string, data []byte, o
 			Header:  make(nats.Header),
 		}
 		msg.Header.Set("Nats-Msg-Id", opt.DeduplicationID)
-
+		if rid := auth.RequestIDFromContext(ctx); rid != "" {
+			msg.Header.Set("X-Request-ID", rid)
+		}
 		_, err := r.js.PublishMsg(ctx, msg)
 		return err
 	}
@@ -154,7 +158,16 @@ func (r *NATSRouter) Subscribe(ctx context.Context, subject string, opts ...SubO
 
 // EnsureStream creates or updates a JetStream stream covering the given subjects.
 // Safe to call on every startup — CreateOrUpdateStream is idempotent.
+//
+// Storage is controlled by the NATS_STORAGE env var:
+//
+//	"memory" → jetstream.MemoryStorage  (fast, data lost on restart — dev only)
+//	"file"   → jetstream.FileStorage    (durable, production default)
 func (r *NATSRouter) EnsureStream(ctx context.Context, name string, subjects []string) error {
+	storage := jetstream.FileStorage
+	if os.Getenv("NATS_STORAGE") == "memory" {
+		storage = jetstream.MemoryStorage
+	}
 	_, err := r.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:       name,
 		Subjects:   subjects,
@@ -162,7 +175,7 @@ func (r *NATSRouter) EnsureStream(ctx context.Context, name string, subjects []s
 		Duplicates: 2 * time.Minute, // dedup window for exactly-once commands
 		MaxAge:     5 * time.Minute,
 		MaxMsgs:    100_000,
-		Storage:    jetstream.MemoryStorage,
+		Storage:    storage,
 	})
 	return err
 }

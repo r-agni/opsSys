@@ -17,6 +17,7 @@ export function HomePage() {
   const [newName, setNewName] = useState('')
   const [newDisplayName, setNewDisplayName] = useState('')
   const [creating, setCreating] = useState(false)
+  const [createError, setCreateError] = useState('')
 
   const load = async () => {
     try {
@@ -54,14 +55,15 @@ export function HomePage() {
   const handleCreate = async () => {
     if (!newName.trim()) return
     setCreating(true)
+    setCreateError('')
     try {
       await fleetApi.createProject(newName.trim(), newDisplayName.trim() || newName.trim())
       setShowCreate(false)
       setNewName('')
       setNewDisplayName('')
       await load()
-    } catch {
-      // TODO: show error
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : 'Failed to create project')
     } finally {
       setCreating(false)
     }
@@ -112,7 +114,8 @@ export function HomePage() {
         </div>
       )}
 
-      <Modal open={showCreate} onClose={() => setShowCreate(false)} title="Create Project">
+      <Modal open={showCreate} onClose={() => { setShowCreate(false); setCreateError('') }} title="Create Project">
+        {createError && <div className={styles.error}>{createError}</div>}
         <div className={styles.formRow}>
           <label>Project Name (slug)</label>
           <input

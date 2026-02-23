@@ -36,6 +36,7 @@ type config struct {
 	BatchSize     int
 	BatchInterval time.Duration
 	HTTPAddr      string
+	Workers       int
 }
 
 func loadConfig() config {
@@ -53,12 +54,20 @@ func loadConfig() config {
 		}
 	}
 
+	workers := 4
+	if s := os.Getenv("INGEST_WORKERS"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			workers = n
+		}
+	}
+
 	return config{
 		NATSUrl:       envOr("NATS_URL", "nats://localhost:4222"),
 		QuestDBAddr:   envOr("QUESTDB_ADDR", "localhost:9009"),
 		BatchSize:     batchSize,
 		BatchInterval: batchInterval,
 		HTTPAddr:      envOr("HTTP_ADDR", ":8085"),
+		Workers:       workers,
 	}
 }
 
@@ -93,21 +102,24 @@ func main() {
 	}
 	slog.Info("JetStream telemetry stream ready")
 
-	writer, err := newILPWriter(cfg.QuestDBAddr, cfg.BatchSize, cfg.BatchInterval)
-	if err != nil {
-		slog.Error("ILP writer init", "err", err)
-		os.Exit(1)
-	}
-	defer writer.Close()
-	slog.Info("QuestDB ILP writer ready")
-
 	ch, err := nr.Subscribe(ctx, "telemetry.>", router.SubOptions{Durable: "ingest-worker"})
 	if err != nil {
 		slog.Error("subscribe telemetry", "err", err)
 		os.Exit(1)
 	}
 
-	go processMessages(ch, writer)
+	// Fan-out: N worker goroutines each with their own ILP writer to avoid
+	// mutex contention on the single TCP connection during batch flushes.
+	for i := 0; i < cfg.Workers; i++ {
+		w, err := newILPWriter(cfg.QuestDBAddr, cfg.BatchSize, cfg.BatchInterval)
+		if err != nil {
+			slog.Error("ILP writer init (worker)", "err", err, "worker", i)
+			os.Exit(1)
+		}
+		defer w.Close()
+		go processMessages(ch, w)
+	}
+	slog.Info("ingest worker pool started", "workers", cfg.Workers)
 
 	httpServer := &http.Server{
 		Addr: cfg.HTTPAddr,
@@ -157,17 +169,21 @@ func processMessages(ch <-chan *router.Message, writer *ilpWriter) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 type dataEnvelope struct {
-	VehicleID   string  // field 1  (wire type 2, string)
-	TimestampNs uint64  // field 2  (wire type 0, varint)
-	StreamType  uint64  // field 3  (wire type 0, varint)
-	Payload     []byte  // field 4  (wire type 2, bytes)
-	Lat         float64 // field 5  (wire type 1, double)
-	Lon         float64 // field 6  (wire type 1, double)
-	Alt         float32 // field 7  (wire type 5, float)
-	Seq         uint64  // field 8  (wire type 0, varint)
-	FleetID     string  // field 16 (wire type 2, string) — project_id
-	OrgID       string  // field 17 (wire type 2, string)
-	StreamName  string  // field 18 (wire type 2, string)
+	VehicleID    string  // field 1  (wire type 2, string)
+	TimestampNs  uint64  // field 2  (wire type 0, varint)
+	StreamType   uint64  // field 3  (wire type 0, varint)
+	Payload      []byte  // field 4  (wire type 2, bytes)
+	Lat          float64 // field 5  (wire type 1, double)
+	Lon          float64 // field 6  (wire type 1, double)
+	Alt          float32 // field 7  (wire type 5, float)
+	Seq          uint64  // field 8  (wire type 0, varint)
+	FleetID      string  // field 16 (wire type 2, string) — project_id
+	OrgID        string  // field 17 (wire type 2, string)
+	StreamName   string  // field 18 (wire type 2, string)
+	SenderID     string  // field 19 (wire type 2, string)
+	SenderType   string  // field 20 (wire type 2, string)
+	ReceiverID   string  // field 21 (wire type 2, string)
+	ReceiverType string  // field 22 (wire type 2, string)
 }
 
 func decodeDataEnvelope(data []byte) (*dataEnvelope, error) {
@@ -234,6 +250,14 @@ func decodeDataEnvelope(data []byte) (*dataEnvelope, error) {
 				env.OrgID = string(b)
 			case 18:
 				env.StreamName = string(b)
+			case 19:
+				env.SenderID = string(b)
+			case 20:
+				env.SenderType = string(b)
+			case 21:
+				env.ReceiverID = string(b)
+			case 22:
+				env.ReceiverType = string(b)
 			}
 
 		case 5: // 32-bit fixed (float)
@@ -303,6 +327,22 @@ func buildILPLine(env *dataEnvelope) []byte {
 	if env.StreamName != "" {
 		buf.WriteString(",stream_name=")
 		buf.WriteString(escapeTagValue(env.StreamName))
+	}
+	if env.SenderID != "" {
+		buf.WriteString(",sender_id=")
+		buf.WriteString(escapeTagValue(env.SenderID))
+	}
+	if env.SenderType != "" {
+		buf.WriteString(",sender_type=")
+		buf.WriteString(escapeTagValue(env.SenderType))
+	}
+	if env.ReceiverID != "" {
+		buf.WriteString(",receiver_id=")
+		buf.WriteString(escapeTagValue(env.ReceiverID))
+	}
+	if env.ReceiverType != "" {
+		buf.WriteString(",receiver_type=")
+		buf.WriteString(escapeTagValue(env.ReceiverType))
 	}
 
 	// Fields (space-separated from tags)

@@ -28,14 +28,18 @@ import (
 type config struct {
 	HTTPAddr   string
 	QuestDBDSN string
-	JWKSUrl    string
+	JWKSURLs   string
 }
 
 func loadConfig() config {
+	jwks := os.Getenv("JWKS_URLS")
+	if jwks == "" {
+		jwks = os.Getenv("JWKS_URL")
+	}
 	return config{
 		HTTPAddr:   envOr("HTTP_ADDR", ":8081"),
 		QuestDBDSN: envOr("QUESTDB_DSN", "user=admin password=quest host=localhost port=8812 dbname=qdb sslmode=disable"),
-		JWKSUrl:    envOr("JWKS_URL", ""),
+		JWKSURLs:   jwks,
 	}
 }
 
@@ -67,15 +71,15 @@ func main() {
 	slog.Info("QuestDB connected")
 
 	var validator *auth.Validator
-	if cfg.JWKSUrl != "" {
-		validator, err = auth.NewValidator(cfg.JWKSUrl)
+	if cfg.JWKSURLs != "" {
+		validator, err = auth.NewValidator(cfg.JWKSURLs)
 		if err != nil {
 			slog.Error("auth validator init", "err", err)
 			os.Exit(1)
 		}
 		slog.Info("auth validator initialized")
 	} else {
-		slog.Warn("JWKS_URL not set — auth middleware will reject all requests")
+		slog.Warn("JWKS_URLS not set — auth middleware will reject all requests")
 	}
 
 	srv := &server{db: db, validator: validator}
@@ -121,7 +125,7 @@ func (s *server) routes() http.Handler {
 		mux.Handle("/v1/telemetry", protect(http.HandlerFunc(s.handleTelemetry)))
 	}
 
-	return corsMiddleware(mux)
+	return auth.RequestIDMiddleware(corsMiddleware(mux))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -167,9 +171,9 @@ func (s *server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := injectOrgFilter(trimmed, claims.OrgID)
+	query, queryArgs := injectOrgFilter(trimmed, claims.OrgID)
 
-	rows, err := s.db.QueryContext(r.Context(), query)
+	rows, err := s.db.QueryContext(r.Context(), query, queryArgs...)
 	if err != nil {
 		slog.Error("query execution failed", "err", err, "sql", query)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query execution failed"})
@@ -269,10 +273,6 @@ func (s *server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 
 	projectID := q.Get("project")
 
-	safeVID := escapeSQLString(vehicleID)
-	safeOrg := escapeSQLString(claims.OrgID)
-	safeST := escapeSQLString(streamType)
-
 	var columns string
 	if sampleBy != "" {
 		columns = `timestamp,
@@ -287,10 +287,12 @@ func (s *server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 			battery_pct, speed_ms, heading`
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM telemetry WHERE vehicle_id = '%s' AND org_id = '%s'",
-		columns, safeVID, safeOrg)
+	// Build query with numbered placeholders for user-supplied values.
+	// QuestDB supports $1-style parameters over the PostgreSQL wire protocol.
+	args := []interface{}{vehicleID, claims.OrgID, streamType}
+	query := fmt.Sprintf("SELECT %s FROM telemetry WHERE vehicle_id = $1 AND org_id = $2 AND stream_type = $3", columns)
 
-	query += fmt.Sprintf(" AND stream_type = '%s'", safeST)
+	nextParam := 4
 
 	if timeSQL := parseTimeExpr(startExpr); timeSQL != "" {
 		query += " AND timestamp > " + timeSQL
@@ -302,7 +304,9 @@ func (s *server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if projectID != "" {
-		query += fmt.Sprintf(" AND project_id = '%s'", escapeSQLString(projectID))
+		query += fmt.Sprintf(" AND project_id = $%d", nextParam)
+		args = append(args, projectID)
+		nextParam++
 	}
 
 	if sampleBy != "" {
@@ -312,7 +316,7 @@ func (s *server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	query += " ORDER BY timestamp DESC"
 	query += fmt.Sprintf(" LIMIT %d", limit)
 
-	rows, err := s.db.QueryContext(r.Context(), query)
+	rows, err := s.db.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		slog.Error("telemetry query failed", "err", err, "sql", query)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
@@ -360,24 +364,23 @@ func (s *server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 // injectOrgFilter appends an org_id filter to queries on the telemetry table
-// to prevent cross-organization data access. The org_id comes from validated
-// JWT claims, not user input, but is still sanitized defensively.
-func injectOrgFilter(query, orgID string) string {
+// to prevent cross-organization data access. Uses a parameterized placeholder
+// so the value is never interpolated into the SQL string.
+func injectOrgFilter(query, orgID string) (string, []interface{}) {
 	lower := strings.ToLower(query)
 	if !strings.Contains(lower, "telemetry") {
-		return query
+		return query, nil
 	}
 	if strings.Contains(lower, "org_id") {
-		return query
+		return query, nil
 	}
 
-	safe := escapeSQLString(orgID)
 	insertPos := findClauseInsertPos(lower)
 
 	if strings.Contains(lower, "where") {
-		return query[:insertPos] + fmt.Sprintf(" AND org_id = '%s'", safe) + " " + query[insertPos:]
+		return query[:insertPos] + " AND org_id = $1" + " " + query[insertPos:], []interface{}{orgID}
 	}
-	return query[:insertPos] + fmt.Sprintf(" WHERE org_id = '%s'", safe) + " " + query[insertPos:]
+	return query[:insertPos] + " WHERE org_id = $1" + " " + query[insertPos:], []interface{}{orgID}
 }
 
 // findClauseInsertPos returns the position before ORDER BY, GROUP BY, LIMIT,

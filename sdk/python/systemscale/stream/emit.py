@@ -33,6 +33,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..core.proto import encode_data_envelope
 from ..core.transport import post_with_retry
 
 logger = logging.getLogger("systemscale")
@@ -82,6 +83,7 @@ class StreamEmitter:
         *,
         agent_api:  str = "http://127.0.0.1:7777",
         queue_size: int = 8192,
+        wire_format: str = "json",
     ) -> None:
         self._api_key   = api_key
         self._project   = project
@@ -92,6 +94,7 @@ class StreamEmitter:
         self._stopped = False
         self._agentless: bool = False
         self._warned_agentless: bool = False
+        self._wire_format = wire_format  # "json" or "proto"
 
     def set_agentless(self, value: bool) -> None:
         """Switch agentless mode on/off. Called by Client when agent availability changes."""
@@ -161,7 +164,11 @@ class StreamEmitter:
     # ── Background sender ─────────────────────────────────────────────────────
 
     def _run(self) -> None:
-        url = f"{self._agent_api}/v1/log"
+        json_url  = f"{self._agent_api}/v1/log"
+        proto_url = f"{self._agent_api}/v1/log/proto"
+        use_proto = self._wire_format == "proto"
+        _requeue_count: dict[int, int] = {}
+
         while not self._stopped:
             try:
                 item = self._queue.get(timeout=0.1)
@@ -178,25 +185,48 @@ class StreamEmitter:
                         "until the edge agent becomes available."
                     )
                     self._warned_agentless = True
-                try:
-                    self._queue.put_nowait(item)  # re-queue to preserve frames
-                except queue.Full:
-                    pass  # queue full warning is handled in send()
+                frame_id = id(item)
+                retries = _requeue_count.get(frame_id, 0)
+                if retries < 3:
+                    _requeue_count[frame_id] = retries + 1
+                    try:
+                        self._queue.put_nowait(item)
+                    except queue.Full:
+                        pass
+                else:
+                    _requeue_count.pop(frame_id, None)
+                    logger.warning("systemscale: dropping frame after 3 agentless re-queue attempts")
                 import time as _time; _time.sleep(0.1)
                 continue
+            _requeue_count.clear()
 
-            body_dict: dict[str, Any] = {
-                "data":       item.data,
-                "stream":     item.stream,
-                "lat":        item.lat,
-                "lon":        item.lon,
-                "alt":        item.alt,
-                "project_id": item.project_id,
-            }
-            if item.stream_name:
-                body_dict["stream_name"] = item.stream_name
-            if item.tags:
-                body_dict["tags"] = item.tags
-            if item.to:
-                body_dict["to"] = item.to
-            post_with_retry(url, json.dumps(body_dict).encode())
+            if use_proto:
+                payload_bytes = json.dumps(item.data).encode()
+                body = encode_data_envelope(
+                    vehicle_id=self._actor,
+                    stream=item.stream,
+                    payload=payload_bytes,
+                    lat=item.lat, lon=item.lon, alt=item.alt,
+                    fleet_id=item.project_id,
+                    stream_name=item.stream_name or "",
+                    sender_type="device",
+                    sender_id=self._actor,
+                )
+                post_with_retry(proto_url, body,
+                                headers={"Content-Type": "application/x-protobuf"})
+            else:
+                body_dict: dict[str, Any] = {
+                    "data":       item.data,
+                    "stream":     item.stream,
+                    "lat":        item.lat,
+                    "lon":        item.lon,
+                    "alt":        item.alt,
+                    "project_id": item.project_id,
+                }
+                if item.stream_name:
+                    body_dict["stream_name"] = item.stream_name
+                if item.tags:
+                    body_dict["tags"] = item.tags
+                if item.to:
+                    body_dict["to"] = item.to
+                post_with_retry(json_url, json.dumps(body_dict).encode())

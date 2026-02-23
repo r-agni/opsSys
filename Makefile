@@ -13,10 +13,11 @@
 #   make test-go         — run Go tests
 #   make test-python     — run Python tests (pytest)
 #   make lint            — run clippy + golangci-lint
+#   make release-agent   — cross-compile agent binaries for all platforms
 #   make clean           — remove build artefacts
 
 .PHONY: proto build build-api build-all sdk sdk-python sdk-go \
-        test test-rust test-go test-python lint clean
+        test test-rust test-go test-python lint clean release-agent
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Proto generation
@@ -27,8 +28,16 @@
 #   proto/gen/rust/   (Rust — used by agent/ + server/relay/ via prost-build)
 
 proto:
-	@echo "==> Generating protobuf code"
-	buf generate --template proto/buf.gen.yaml proto/
+	@echo "==> Generating protobuf code (Go)"
+	mkdir -p proto/gen/go
+	protoc --go_out=proto/gen/go --go_opt=paths=source_relative \
+	       --go-grpc_out=proto/gen/go --go-grpc_opt=paths=source_relative \
+	       -I proto \
+	       proto/core/common.proto proto/core/envelope.proto \
+	       proto/core/command_service.proto proto/command/command_payloads.proto \
+	       proto/telemetry/telemetry.proto
+	@echo "    Generated Go code in proto/gen/go/"
+	@echo "    Note: for Rust + TypeScript, install buf and run: buf generate --template proto/buf.gen.yaml proto/"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Rust builds
@@ -52,7 +61,7 @@ build-debug:
 
 build-api:
 	@echo "==> Building Go cloud services (server/api/)"
-	cd server/api && go build ./fleet/... ./query/... ./commands/... ./auth/... ./ingest/... ./video/...
+	cd server/api && go build ./fleet/... ./query/... ./commands/... ./auth/... ./ingest/...
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Combined
@@ -145,6 +154,13 @@ build-agent-arm64:
 	    --bin systemscale-agent \
 	    --target $(AGENT_TARGET)
 	@echo "    Binary: agent/target/$(AGENT_TARGET)/release/systemscale-agent"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent precompiled release binaries (all platforms)
+# ─────────────────────────────────────────────────────────────────────────────
+
+release-agent:
+	@bash scripts/build-release.sh
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dev environment

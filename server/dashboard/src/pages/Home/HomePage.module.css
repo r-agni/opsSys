@@ -57,6 +57,15 @@
   font-size: 14px;
 }
 
+.error {
+  color: #ef4444;
+  font-size: 13px;
+  padding: 8px 12px;
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: var(--radius-md);
+  margin-bottom: 12px;
+}
+
 .formRow {
   display: flex;
   flex-direction: column;

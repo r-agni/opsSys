@@ -12,4 +12,16 @@ export default defineConfig({
       '/api/apikeys': { target: 'http://localhost:8083', changeOrigin: true, rewrite: (p) => p.replace(/^\/api\/apikeys/, '') },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+          'vendor-charts': ['echarts', 'echarts-for-react'],
+          'vendor-maps': ['leaflet', 'react-leaflet'],
+          'vendor-auth': ['oidc-client-ts'],
+        },
+      },
+    },
+  },
 })

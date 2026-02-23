@@ -1,0 +1,17 @@
+# Cross.toml — configuration for the `cross` cross-compilation tool.
+# https://github.com/cross-rs/cross
+#
+# These images are pinned to specific tags for reproducible builds.
+# Update the tags when upgrading toolchains.
+
+[build.env]
+passthrough = ["AGENT_VERSION"]
+
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
+
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
+
+[target.armv7-unknown-linux-gnueabihf]
+image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf:main"

@@ -11,6 +11,7 @@ import http.client
 import json
 import logging
 import os
+import random
 import threading
 import time
 import urllib.error
@@ -21,7 +22,9 @@ from typing import Any
 logger = logging.getLogger("systemscale")
 
 _pool_lock = threading.Lock()
-_pool: dict[tuple[str, str, int], http.client.HTTPConnection] = {}
+_pool: dict[tuple[str, str, int], tuple[http.client.HTTPConnection, float]] = {}
+_POOL_MAX_SIZE = 16
+_POOL_IDLE_TTL = 60.0  # seconds
 
 
 def _get_conn(url: str) -> tuple[http.client.HTTPConnection, str]:
@@ -35,20 +38,43 @@ def _get_conn(url: str) -> tuple[http.client.HTTPConnection, str]:
         path += "?" + parsed.query
 
     key = (scheme, host, port)
+    now = time.time()
     with _pool_lock:
-        conn = _pool.get(key)
-        if conn is not None:
+        # Evict idle connections
+        stale = [k for k, (_, ts) in _pool.items() if now - ts > _POOL_IDLE_TTL]
+        for k in stale:
+            entry = _pool.pop(k, None)
+            if entry:
+                try:
+                    entry[0].close()
+                except Exception:
+                    pass
+
+        entry = _pool.get(key)
+        if entry is not None:
+            conn, _ = entry
             try:
                 conn.sock  # noqa: test if socket is still alive
+                _pool[key] = (conn, now)
                 return conn, path
             except Exception:
                 _pool.pop(key, None)
+
+        # Enforce max pool size by evicting oldest entry
+        if len(_pool) >= _POOL_MAX_SIZE:
+            oldest_key = min(_pool, key=lambda k: _pool[k][1])
+            evicted = _pool.pop(oldest_key, None)
+            if evicted:
+                try:
+                    evicted[0].close()
+                except Exception:
+                    pass
 
         if scheme == "https":
             conn = http.client.HTTPSConnection(host, port, timeout=15)
         else:
             conn = http.client.HTTPConnection(host, port, timeout=15)
-        _pool[key] = conn
+        _pool[key] = (conn, now)
     return conn, path
 
 
@@ -112,7 +138,8 @@ def post_with_retry(
         except Exception as e:
             logger.debug("POST %s failed (attempt %d/%d): %s", url, attempt + 1, max_retries, e)
             if attempt < max_retries - 1:
-                time.sleep(retry_delay * (2 ** attempt))
+                delay = retry_delay * (2 ** attempt)
+                time.sleep(delay + random.uniform(0, delay * 0.5))
     return False
 
 
