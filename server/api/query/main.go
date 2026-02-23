@@ -1,21 +1,9 @@
-// query-api: REST + gRPC service for historical telemetry queries.
+// query-api: HTTP service for querying telemetry from QuestDB via PostgreSQL wire protocol.
 //
-// Two storage backends, queried transparently by time range:
-//   Hot  (0-30 days): QuestDB — SQL via PostgreSQL wire protocol
-//   Cold (30d+):      S3 Parquet files — DuckDB WASM or subprocess query
-//
-// REST API:
-//   GET /v1/telemetry?vehicle_id=X&start=T&end=T&limit=N
-//   GET /v1/telemetry/query?sql=SELECT+...    (passthrough to QuestDB)
-//   GET /v1/vehicles/{id}/events?start=T&end=T
-//
-// All queries are scoped to the operator's org_id. SQL passthrough adds
-// WHERE org_id = '...' to prevent cross-tenant data access.
-//
-// QuestDB supports SQL with time-series extensions:
-//   SELECT * FROM telemetry
-//   WHERE vehicle_id = 'xxx' AND timestamp BETWEEN '2024-01-01' AND '2024-01-02'
-//   SAMPLE BY 1s FILL(NONE);  -- downsample to 1-second resolution
+// Routes:
+//   GET  /healthz       → public health check (DB ping)
+//   POST /v1/query      → execute parameterized SQL (org_id auto-injected)
+//   GET  /v1/telemetry  → convenience telemetry query with downsampling support
 package main
 
 import (
@@ -27,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -36,125 +25,207 @@ import (
 	"github.com/systemscale/services/shared/auth"
 )
 
-// ──────────────────────────────────────────────────────────────────────────────
-// QuestDB query client
-// ──────────────────────────────────────────────────────────────────────────────
-
-// questDBClient wraps the QuestDB PostgreSQL-compatible wire connection.
-// QuestDB exposes a Postgres-compatible endpoint on port 8812.
-type questDBClient struct {
-	db *sql.DB
+type config struct {
+	HTTPAddr   string
+	QuestDBDSN string
+	JWKSUrl    string
 }
 
-func newQuestDBClient(dsn string) (*questDBClient, error) {
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("questdb open: %w", err)
+func loadConfig() config {
+	return config{
+		HTTPAddr:   envOr("HTTP_ADDR", ":8081"),
+		QuestDBDSN: envOr("QUESTDB_DSN", "user=admin password=quest host=localhost port=8812 dbname=qdb sslmode=disable"),
+		JWKSUrl:    envOr("JWKS_URL", ""),
 	}
-	// QuestDB handles many short queries — a small pool is fine
-	db.SetMaxOpenConns(10)
+}
+
+type server struct {
+	db        *sql.DB
+	validator *auth.Validator
+}
+
+func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	cfg := loadConfig()
+	slog.Info("starting query-api", "addr", cfg.HTTPAddr)
+
+	db, err := sql.Open("postgres", cfg.QuestDBDSN)
+	if err != nil {
+		slog.Error("QuestDB open", "err", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(5 * time.Minute)
-	return &questDBClient{db: db}, nil
-}
 
-// TelemetryRow is a single row returned from QuestDB.
-type TelemetryRow struct {
-	VehicleID   string    `json:"vehicle_id"`
-	Timestamp   time.Time `json:"timestamp"`
-	StreamType  string    `json:"stream_type"`
-	Lat         float64   `json:"lat"`
-	Lon         float64   `json:"lon"`
-	AltM        float64   `json:"alt_m"`
-	SeqNum      int64     `json:"seq_num"`
-	PayloadSize int64     `json:"payload_size"`
-}
-
-// queryTelemetry executes a scoped QuestDB query and returns rows.
-// start/end are RFC3339 timestamps. limit caps result count (max 10000).
-func (q *questDBClient) queryTelemetry(
-	ctx context.Context,
-	vehicleID string,
-	start, end time.Time,
-	limit int,
-) ([]TelemetryRow, error) {
-	if limit <= 0 || limit > 10_000 {
-		limit = 10_000
+	if err := db.Ping(); err != nil {
+		slog.Error("QuestDB ping", "err", err)
+		os.Exit(1)
 	}
+	slog.Info("QuestDB connected")
 
-	query := `
-		SELECT vehicle_id, timestamp, stream_type, lat, lon, alt_m, seq_num, payload_size
-		FROM telemetry
-		WHERE vehicle_id = $1
-		  AND timestamp >= $2
-		  AND timestamp <= $3
-		ORDER BY timestamp ASC
-		LIMIT $4`
-
-	rows, err := q.db.QueryContext(ctx, query, vehicleID, start, end, limit)
-	if err != nil {
-		return nil, fmt.Errorf("questdb query: %w", err)
-	}
-	defer rows.Close()
-
-	result := make([]TelemetryRow, 0, 256)
-	for rows.Next() {
-		var r TelemetryRow
-		if err := rows.Scan(
-			&r.VehicleID, &r.Timestamp, &r.StreamType,
-			&r.Lat, &r.Lon, &r.AltM, &r.SeqNum, &r.PayloadSize,
-		); err != nil {
-			return nil, fmt.Errorf("scan row: %w", err)
+	var validator *auth.Validator
+	if cfg.JWKSUrl != "" {
+		validator, err = auth.NewValidator(cfg.JWKSUrl)
+		if err != nil {
+			slog.Error("auth validator init", "err", err)
+			os.Exit(1)
 		}
-		result = append(result, r)
+		slog.Info("auth validator initialized")
+	} else {
+		slog.Warn("JWKS_URL not set — auth middleware will reject all requests")
 	}
-	return result, rows.Err()
+
+	srv := &server{db: db, validator: validator}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+
+	httpServer := &http.Server{
+		Addr:         cfg.HTTPAddr,
+		Handler:      srv.routes(),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	go func() {
+		<-ctx.Done()
+		slog.Info("shutting down query-api")
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutCancel()
+		httpServer.Shutdown(shutCtx)
+	}()
+
+	slog.Info("query-api ready", "addr", cfg.HTTPAddr)
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		slog.Error("HTTP serve", "err", err)
+		os.Exit(1)
+	}
 }
 
-// execSQL executes arbitrary SQL against QuestDB.
-// IMPORTANT: the caller must inject WHERE org_id scoping before calling this.
-// This method assumes the SQL has already been validated and scoped.
-func (q *questDBClient) execSQL(ctx context.Context, query string, args ...interface{}) ([]map[string]interface{}, error) {
-	rows, err := q.db.QueryContext(ctx, query, args...)
+// ──────────────────────────────────────────────────────────────────────────────
+// Routes
+// ──────────────────────────────────────────────────────────────────────────────
+
+func (s *server) routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/healthz", s.handleHealthz)
+
+	if s.validator != nil {
+		protect := auth.HTTPMiddleware(s.validator)
+		mux.Handle("/v1/query", protect(http.HandlerFunc(s.handleQuery)))
+		mux.Handle("/v1/telemetry", protect(http.HandlerFunc(s.handleTelemetry)))
+	}
+
+	return corsMiddleware(mux)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Handlers
+// ──────────────────────────────────────────────────────────────────────────────
+
+func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if err := s.db.PingContext(r.Context()); err != nil {
+		http.Error(w, "db unreachable", http.StatusServiceUnavailable)
+		return
+	}
+	fmt.Fprint(w, "ok")
+}
+
+func (s *server) handleQuery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		SQL    string        `json:"sql"`
+		Params []interface{} `json:"params"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	if req.SQL == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sql is required"})
+		return
+	}
+
+	trimmed := strings.TrimSpace(req.SQL)
+	if !strings.HasPrefix(strings.ToUpper(trimmed), "SELECT") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "only SELECT queries are allowed"})
+		return
+	}
+
+	query := injectOrgFilter(trimmed, claims.OrgID)
+
+	rows, err := s.db.QueryContext(r.Context(), query)
 	if err != nil {
-		return nil, fmt.Errorf("questdb execSQL: %w", err)
+		slog.Error("query execution failed", "err", err, "sql", query)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query execution failed"})
+		return
 	}
 	defer rows.Close()
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return nil, err
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read columns"})
+		return
 	}
 
-	result := make([]map[string]interface{}, 0, 256)
+	var result [][]interface{}
 	for rows.Next() {
-		vals := make([]interface{}, len(cols))
+		values := make([]interface{}, len(cols))
 		ptrs := make([]interface{}, len(cols))
-		for i := range vals {
-			ptrs[i] = &vals[i]
+		for i := range values {
+			ptrs[i] = &values[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return nil, err
+			slog.Warn("row scan error", "err", err)
+			continue
 		}
-		row := make(map[string]interface{}, len(cols))
-		for i, col := range cols {
-			row[col] = vals[i]
+		row := make([]interface{}, len(cols))
+		for i, v := range values {
+			switch val := v.(type) {
+			case []byte:
+				row[i] = string(val)
+			case time.Time:
+				row[i] = val.Format(time.RFC3339Nano)
+			default:
+				row[i] = val
+			}
 		}
 		result = append(result, row)
 	}
-	return result, rows.Err()
+	if result == nil {
+		result = [][]interface{}{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"columns": cols,
+		"rows":    result,
+		"count":   len(result),
+	})
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// HTTP handlers
-// ──────────────────────────────────────────────────────────────────────────────
+var validInterval = regexp.MustCompile(`^\d+[smhd]$`)
 
-type queryAPI struct {
-	qdb *questDBClient
-}
+func (s *server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
-// GET /v1/telemetry?vehicle_id=X&start=T&end=T&limit=N
-func (a *queryAPI) queryTelemetry(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -162,178 +233,202 @@ func (a *queryAPI) queryTelemetry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
+
 	vehicleID := q.Get("vehicle_id")
 	if vehicleID == "" {
-		http.Error(w, "Bad Request: vehicle_id required", http.StatusBadRequest)
-		return
-	}
-	if !claims.CanAccessVehicle(vehicleID) {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "vehicle_id is required"})
 		return
 	}
 
-	start, err := parseTimeParam(q.Get("start"), time.Now().Add(-1*time.Hour))
-	if err != nil {
-		http.Error(w, "Bad Request: invalid start time", http.StatusBadRequest)
-		return
+	streamType := q.Get("stream_type")
+	if streamType == "" {
+		streamType = "telemetry"
 	}
-	end, err := parseTimeParam(q.Get("end"), time.Now())
-	if err != nil {
-		http.Error(w, "Bad Request: invalid end time", http.StatusBadRequest)
+
+	startExpr := q.Get("start")
+	if startExpr == "" {
+		startExpr = "-1h"
+	}
+	endExpr := q.Get("end")
+
+	sampleBy := q.Get("sample_by")
+	if sampleBy != "" && !validInterval.MatchString(sampleBy) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid sample_by format (e.g. 1m, 5s, 1h)"})
 		return
 	}
 
 	limit := 1000
-	if l := q.Get("limit"); l != "" {
-		if n, err := strconv.Atoi(l); err == nil && n > 0 {
-			limit = n
-		} else {
-			http.Error(w, "Bad Request: invalid limit", http.StatusBadRequest)
-			return
+	if ls := q.Get("limit"); ls != "" {
+		if l, err := strconv.Atoi(ls); err == nil && l > 0 {
+			limit = l
+		}
+	}
+	if limit > 10000 {
+		limit = 10000
+	}
+
+	projectID := q.Get("project")
+
+	safeVID := escapeSQLString(vehicleID)
+	safeOrg := escapeSQLString(claims.OrgID)
+	safeST := escapeSQLString(streamType)
+
+	var columns string
+	if sampleBy != "" {
+		columns = `timestamp,
+			first(vehicle_id) as vehicle_id, first(stream_type) as stream_type,
+			first(stream_name) as stream_name,
+			avg(lat) as lat, avg(lon) as lon, avg(alt_m) as alt_m,
+			last(seq) as seq, last(payload_json) as payload_json,
+			avg(battery_pct) as battery_pct, avg(speed_ms) as speed_ms, avg(heading) as heading`
+	} else {
+		columns = `timestamp, vehicle_id, stream_type, stream_name,
+			lat, lon, alt_m, seq, payload_json,
+			battery_pct, speed_ms, heading`
+	}
+
+	query := fmt.Sprintf("SELECT %s FROM telemetry WHERE vehicle_id = '%s' AND org_id = '%s'",
+		columns, safeVID, safeOrg)
+
+	query += fmt.Sprintf(" AND stream_type = '%s'", safeST)
+
+	if timeSQL := parseTimeExpr(startExpr); timeSQL != "" {
+		query += " AND timestamp > " + timeSQL
+	}
+	if endExpr != "" {
+		if endSQL := parseTimeExpr(endExpr); endSQL != "" {
+			query += " AND timestamp < " + endSQL
 		}
 	}
 
-	rows, err := a.qdb.queryTelemetry(r.Context(), vehicleID, start, end, limit)
+	if projectID != "" {
+		query += fmt.Sprintf(" AND project_id = '%s'", escapeSQLString(projectID))
+	}
+
+	if sampleBy != "" {
+		query += " SAMPLE BY " + sampleBy
+	}
+
+	query += " ORDER BY timestamp DESC"
+	query += fmt.Sprintf(" LIMIT %d", limit)
+
+	rows, err := s.db.QueryContext(r.Context(), query)
 	if err != nil {
-		slog.Error("telemetry query failed", "err", err, "vehicle", vehicleID)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		slog.Error("telemetry query failed", "err", err, "sql", query)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
+	defer rows.Close()
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"vehicle_id": vehicleID,
-		"start":      start.Format(time.RFC3339),
-		"end":        end.Format(time.RFC3339),
-		"count":      len(rows),
-		"rows":       rows,
-	})
-}
+	cols, _ := rows.Columns()
+	var results []map[string]interface{}
 
-// GET /v1/telemetry/query?sql=SELECT+...
-// SQL passthrough to QuestDB. Restricted to SELECT only.
-// Always appends WHERE vehicle_id IN (operator's vehicle_set) for safety.
-func (a *queryAPI) passthroughQuery(w http.ResponseWriter, r *http.Request) {
-	claims, ok := auth.ClaimsFromContext(r.Context())
-	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	rawSQL := r.URL.Query().Get("sql")
-	if rawSQL == "" {
-		http.Error(w, "Bad Request: sql parameter required", http.StatusBadRequest)
-		return
-	}
-
-	// Safety: only allow SELECT statements
-	trimmed := strings.TrimSpace(strings.ToUpper(rawSQL))
-	if !strings.HasPrefix(trimmed, "SELECT") {
-		http.Error(w, "Bad Request: only SELECT statements allowed", http.StatusBadRequest)
-		return
-	}
-
-	// Inject vehicle_id scoping for non-admin operators
-	// Admin operators' org_id scoping is done by appending a WHERE clause
-	scopedSQL := rawSQL
-	if claims.Role != auth.RoleAdmin && len(claims.VehicleSet) > 0 {
-		// Wrap as subquery with vehicle_id filter.
-		// Vehicle IDs come from JWT claims issued by apikey-service, but validate
-		// they contain only UUID-safe characters as defense in depth.
-		ids := make([]string, len(claims.VehicleSet))
-		for i, id := range claims.VehicleSet {
-			if !isUUIDSafe(id) {
-				http.Error(w, "Forbidden", http.StatusForbidden)
-				return
+	for rows.Next() {
+		values := make([]interface{}, len(cols))
+		ptrs := make([]interface{}, len(cols))
+		for i := range values {
+			ptrs[i] = &values[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			continue
+		}
+		row := make(map[string]interface{}, len(cols))
+		for i, col := range cols {
+			switch val := values[i].(type) {
+			case []byte:
+				row[col] = string(val)
+			case time.Time:
+				row[col] = val.Format(time.RFC3339Nano)
+			default:
+				row[col] = val
 			}
-			ids[i] = fmt.Sprintf("'%s'", id)
 		}
-		scopedSQL = fmt.Sprintf(
-			"SELECT * FROM (%s) WHERE vehicle_id IN (%s)",
-			rawSQL, strings.Join(ids, ","),
-		)
+		results = append(results, row)
 	}
-
-	rows, err := a.qdb.execSQL(r.Context(), scopedSQL)
-	if err != nil {
-		slog.Error("passthrough query failed", "err", err)
-		http.Error(w, fmt.Sprintf("Query error: %v", err), http.StatusBadRequest)
-		return
+	if results == nil {
+		results = []map[string]interface{}{}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"count": len(rows),
-		"rows":  rows,
+		"rows":  results,
+		"count": len(results),
 	})
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Router + main
+// SQL helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-func (a *queryAPI) routes(v *auth.Validator) http.Handler {
-	mux := http.NewServeMux()
-	protect := auth.HTTPMiddleware(v)
+// injectOrgFilter appends an org_id filter to queries on the telemetry table
+// to prevent cross-organization data access. The org_id comes from validated
+// JWT claims, not user input, but is still sanitized defensively.
+func injectOrgFilter(query, orgID string) string {
+	lower := strings.ToLower(query)
+	if !strings.Contains(lower, "telemetry") {
+		return query
+	}
+	if strings.Contains(lower, "org_id") {
+		return query
+	}
 
-	mux.Handle("/v1/telemetry",       protect(http.HandlerFunc(a.queryTelemetry)))
-	mux.Handle("/v1/telemetry/query", protect(http.HandlerFunc(a.passthroughQuery)))
+	safe := escapeSQLString(orgID)
+	insertPos := findClauseInsertPos(lower)
 
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "ok")
-	})
-	return mux
+	if strings.Contains(lower, "where") {
+		return query[:insertPos] + fmt.Sprintf(" AND org_id = '%s'", safe) + " " + query[insertPos:]
+	}
+	return query[:insertPos] + fmt.Sprintf(" WHERE org_id = '%s'", safe) + " " + query[insertPos:]
 }
 
-func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-
-	httpAddr := envOr("HTTP_ADDR", ":8081")
-	jwksURL  := envOr("JWKS_URL", "https://keycloak.internal/realms/systemscale/protocol/openid-connect/certs")
-	questDSN := envOr("QUESTDB_DSN", "postgresql://admin:quest@localhost:8812/qdb?sslmode=disable")
-	regionID := envOr("REGION_ID", "local")
-
-	slog.Info("Starting query-api", "addr", httpAddr, "region", regionID)
-
-	validator, err := auth.NewValidator(jwksURL)
-	if err != nil {
-		slog.Error("auth validator init", "err", err)
-		os.Exit(1)
-	}
-
-	qdb, err := newQuestDBClient(questDSN)
-	if err != nil {
-		slog.Error("QuestDB connect", "err", err)
-		os.Exit(1)
-	}
-
-	api := &queryAPI{qdb: qdb}
-	server := &http.Server{
-		Addr:         httpAddr,
-		Handler:      corsMiddleware(api.routes(validator)),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second, // queries can take a while
-		IdleTimeout:  60 * time.Second,
-	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer cancel()
-
-	go func() {
-		slog.Info("query-api HTTP server ready", "addr", httpAddr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("HTTP serve error", "err", err)
+// findClauseInsertPos returns the position before ORDER BY, GROUP BY, LIMIT,
+// or SAMPLE BY — the safe place to inject a WHERE/AND condition.
+func findClauseInsertPos(lower string) int {
+	keywords := []string{" order by", " group by", " limit ", " sample by"}
+	pos := len(lower)
+	for _, kw := range keywords {
+		idx := strings.Index(lower, kw)
+		if idx != -1 && idx < pos {
+			pos = idx
 		}
-	}()
+	}
+	return pos
+}
 
-	<-ctx.Done()
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-	server.Shutdown(shutdownCtx)
-	slog.Info("query-api shutdown complete")
+// parseTimeExpr converts a relative time expression ("-1h", "-30m") into a
+// QuestDB dateadd() call, or wraps an absolute ISO timestamp in quotes.
+func parseTimeExpr(s string) string {
+	if s == "" {
+		return ""
+	}
+	if len(s) >= 3 && s[0] == '-' {
+		unit := s[len(s)-1]
+		numStr := s[1 : len(s)-1]
+		if n, err := strconv.Atoi(numStr); err == nil {
+			var qdbUnit string
+			switch unit {
+			case 's':
+				qdbUnit = "s"
+			case 'm':
+				qdbUnit = "m"
+			case 'h':
+				qdbUnit = "h"
+			case 'd':
+				qdbUnit = "d"
+			}
+			if qdbUnit != "" {
+				return fmt.Sprintf("dateadd('%s', -%d, now())", qdbUnit, n)
+			}
+		}
+	}
+	return fmt.Sprintf("'%s'", escapeSQLString(s))
+}
+
+func escapeSQLString(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Helpers
+// Utility
 // ──────────────────────────────────────────────────────────────────────────────
 
 func corsMiddleware(next http.Handler) http.Handler {
@@ -343,7 +438,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 			origin = "*"
 		}
 		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -351,13 +446,6 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-func parseTimeParam(s string, fallback time.Time) (time.Time, error) {
-	if s == "" {
-		return fallback, nil
-	}
-	return time.Parse(time.RFC3339, s)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {
@@ -371,18 +459,4 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
-}
-
-// isUUIDSafe returns true if s contains only hex digits and hyphens (UUID character set).
-func isUUIDSafe(s string) bool {
-	if len(s) == 0 {
-		return false
-	}
-	for _, ch := range s {
-		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') ||
-			(ch >= 'A' && ch <= 'F') || ch == '-') {
-			return false
-		}
-	}
-	return true
 }

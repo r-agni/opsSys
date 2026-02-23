@@ -34,8 +34,6 @@
 #   26257 CockroachDB SQL (postgres wire)
 #   8090  CockroachDB admin UI
 
-version: "3.9"
-
 x-service-defaults: &service-defaults
   restart: unless-stopped
   logging:
@@ -114,7 +112,6 @@ services:
     ports:
       - "8180:8080"
     volumes:
-      - ./keycloak-theme:/opt/keycloak/themes/systemscale:ro
       - keycloak-data:/opt/keycloak/data
       - ./keycloak-realm-import.json:/opt/keycloak/data/import/systemscale-realm.json:ro
     healthcheck:
@@ -146,6 +143,12 @@ services:
       KEYCLOAK_REALM: "systemscale"
       KEYCLOAK_CLIENT_ID: "fleet-api-service"
       KEYCLOAK_CLIENT_SECRET: "fleet-api-secret"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     depends_on:
       cockroach-init:
         condition: service_completed_successfully
@@ -167,6 +170,12 @@ services:
       JWKS_URL: "http://keycloak:8080/realms/systemscale/protocol/openid-connect/certs"
       CORS_ALLOW_ORIGIN: "http://localhost:5173"
       REGION_ID: "local-dev"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     depends_on:
       questdb:
         condition: service_healthy
@@ -188,6 +197,12 @@ services:
       JWKS_URL: "http://keycloak:8080/realms/systemscale/protocol/openid-connect/certs,http://auth:8083/v1/.well-known/jwks.json"
       CORS_ALLOW_ORIGIN: "http://localhost:5173"
       REGION_ID: "local-dev"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8082/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     depends_on:
       nats:
         condition: service_healthy
@@ -229,6 +244,12 @@ services:
       QUESTDB_ADDR: "questdb:9009"
       BATCH_SIZE: "500"
       BATCH_INTERVAL: "500ms"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8085/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     depends_on:
       nats:
         condition: service_healthy

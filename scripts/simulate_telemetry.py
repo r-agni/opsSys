@@ -359,17 +359,35 @@ async def main():
             ts_ns = time.time_ns()
 
             for sim in sims:
-                # Telemetry at ~2Hz
+                sim._tick()
+                telem_payload = {
+                    "roll": round(random.gauss(0, 3), 2),
+                    "pitch": round(random.gauss(0, 2), 2),
+                    "yaw": round(sim.heading, 2),
+                    "vx": round(sim.speed * math.cos(math.radians(sim.heading)), 2),
+                    "vy": round(sim.speed * math.sin(math.radians(sim.heading)), 2),
+                    "vz": round(random.gauss(0, 0.5), 2),
+                    "battery_mv": sim.battery_mv,
+                    "battery_pct": sim.battery_pct,
+                    "armed": sim.armed,
+                    "gps_fix": 3,
+                    "gps_sats": random.randint(10, 18),
+                    "hdop": round(random.uniform(0.5, 2.0), 2),
+                    "heading": round(sim.heading, 2),
+                    "speed_ms": round(sim.speed, 2),
+                    "rssi": random.randint(180, 255),
+                    "link_quality": random.randint(85, 100),
+                }
+
                 data = sim.telemetry_envelope()
                 subj = f"telemetry.{sim.dev['id']}.telemetry"
                 await nc.publish(subj, data)
 
-                payload = json.loads(data[data.find(b'{'):data.rfind(b'}')+1])
                 ilp.add(
                     vehicle_id=sim.dev["id"], stream_type="telemetry",
                     stream_name="flight_state", project_id=sim.dev["project_id"],
                     org_id=sim.dev["org_id"], lat=sim.lat, lon=sim.lon,
-                    alt=sim.alt, seq=sim.seq, payload_json=json.dumps(payload),
+                    alt=sim.alt, seq=sim.seq, payload_json=json.dumps(telem_payload),
                     ts_ns=ts_ns,
                     extra_fields={
                         "battery_pct": f"{sim.battery_pct}i",
@@ -379,39 +397,54 @@ async def main():
                 )
                 msg_count += 1
 
-                # Sensor data at ~1Hz
                 if cycle % 2 == 0:
+                    sensor_payload = {
+                        "sensors": {
+                            "temp_cpu": round(random.uniform(40, 75), 1),
+                            "temp_motor_1": round(random.uniform(35, 65), 1),
+                            "temp_motor_2": round(random.uniform(35, 65), 1),
+                            "vibration_x": round(random.gauss(0, 0.05), 4),
+                            "vibration_y": round(random.gauss(0, 0.05), 4),
+                            "vibration_z": round(random.gauss(0, 0.08), 4),
+                        }
+                    }
                     data = sim.sensor_envelope()
                     subj = f"telemetry.{sim.dev['id']}.sensor"
                     await nc.publish(subj, data)
 
-                    payload = json.loads(data[data.find(b'{'):data.rfind(b'}')+1])
                     ilp.add(
                         vehicle_id=sim.dev["id"], stream_type="sensor",
                         stream_name="onboard_sensors", project_id=sim.dev["project_id"],
                         org_id=sim.dev["org_id"], lat=sim.lat, lon=sim.lon,
-                        alt=sim.alt, seq=sim.seq, payload_json=json.dumps(payload),
+                        alt=sim.alt, seq=sim.seq, payload_json=json.dumps(sensor_payload),
                         ts_ns=ts_ns + 1,
                     )
                     msg_count += 1
 
-                # Log at ~0.5Hz
                 if cycle % 4 == 0:
+                    log_messages = [
+                        "Navigation: waypoint 3/12 reached",
+                        "GPS: RTK fix acquired, accuracy 0.02m",
+                        "Battery: cell balance OK, delta 12mV",
+                    ]
+                    log_payload = {
+                        "level": random.choice(["info", "info", "info", "debug"]),
+                        "message": random.choice(log_messages),
+                        "component": random.choice(["nav", "gps", "power", "comms"]),
+                    }
                     data = sim.log_envelope()
                     subj = f"telemetry.{sim.dev['id']}.log"
                     await nc.publish(subj, data)
 
-                    payload = json.loads(data[data.find(b'{'):data.rfind(b'}')+1])
                     ilp.add(
                         vehicle_id=sim.dev["id"], stream_type="log",
                         stream_name="system_log", project_id=sim.dev["project_id"],
                         org_id=sim.dev["org_id"], lat=0.0, lon=0.0,
-                        alt=0.0, seq=sim.seq, payload_json=json.dumps(payload),
+                        alt=0.0, seq=sim.seq, payload_json=json.dumps(log_payload),
                         ts_ns=ts_ns + 2,
                     )
                     msg_count += 1
 
-                # Events
                 if cycle % 20 == 0 and random.random() < 0.4:
                     events = [
                         (3, "Mode changed to GUIDED"),
@@ -432,7 +465,6 @@ async def main():
                     )
                     msg_count += 1
 
-                # Alerts
                 if cycle % 30 == 0 and random.random() < 0.5:
                     alerts = [
                         ("warning", f"Battery at {sim.battery_pct}% — consider RTL"),
@@ -440,8 +472,6 @@ async def main():
                         ("warning", f"Wind gust detected: {round(random.uniform(5,12),1)} m/s"),
                         ("error", "GPS HDOP degraded to 3.5 — accuracy reduced"),
                         ("critical", "Motor 3 current spike — 42A peak"),
-                        ("info", f"Signal strength: {random.randint(85,100)}%"),
-                        ("warning", "Temperature warning: CPU at 72C"),
                     ]
                     level, msg = random.choice(alerts)
                     data = sim.alert_envelope(level, msg)

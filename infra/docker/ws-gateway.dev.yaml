@@ -1,5 +1,6 @@
 listen_addr: "0.0.0.0:8084"
 nats_url: "nats://nats:4222"
 region_id: "local-dev"
-max_hz: 50
 metrics_addr: "0.0.0.0:9091"
+max_hz: 50
+log_level: "info"

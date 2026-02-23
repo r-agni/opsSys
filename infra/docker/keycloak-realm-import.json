@@ -1,28 +1,88 @@
 {
   "realm": "systemscale",
   "enabled": true,
-  "registrationAllowed": true,
-  "registrationEmailAsUsername": true,
-  "loginTheme": "systemscale",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
   "sslRequired": "none",
-  "roles": {
-    "realm": [
-      { "name": "default-roles-systemscale", "composite": true, "composites": { "realm": ["offline_access", "uma_authorization"] } },
-      { "name": "offline_access" },
-      { "name": "uma_authorization" }
-    ]
-  },
+  "clients": [
+    {
+      "clientId": "systemscale-dashboard",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "redirectUris": ["http://localhost:5173/*", "http://localhost:3000/*"],
+      "webOrigins": ["http://localhost:5173", "http://localhost:3000"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "org_id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "org_id",
+            "claim.name": "org_id",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "role",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "role",
+            "claim.name": "role",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "vehicle_set",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "vehicle_set",
+            "claim.name": "vehicle_set",
+            "jsonType.label": "JSON",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "fleet-api-service",
+      "enabled": true,
+      "publicClient": false,
+      "serviceAccountsEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": false,
+      "secret": "fleet-api-secret",
+      "defaultClientScopes": ["web-origins", "acr", "profile", "roles", "email"],
+      "optionalClientScopes": []
+    }
+  ],
   "users": [
     {
       "username": "ragni.works@gmail.com",
       "email": "ragni.works@gmail.com",
-      "firstName": "System",
-      "lastName": "Scale",
       "enabled": true,
       "emailVerified": true,
+      "firstName": "Admin",
+      "lastName": "User",
       "attributes": {
+        "org_id": ["org-001"],
         "role": ["admin"],
-        "org_id": ["org-001"]
+        "vehicle_set": ["[\"*\"]"]
       },
       "credentials": [
         {
@@ -32,83 +92,5 @@
         }
       ]
     }
-  ],
-  "clients": [
-    {
-      "clientId": "systemscale-dashboard",
-      "enabled": true,
-      "publicClient": true,
-      "directAccessGrantsEnabled": true,
-      "standardFlowEnabled": true,
-      "redirectUris": ["http://localhost:5173/*"],
-      "webOrigins": ["http://localhost:5173"],
-      "protocol": "openid-connect",
-      "protocolMappers": [
-        {
-          "name": "user_role",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-usermodel-attribute-mapper",
-          "consentRequired": false,
-          "config": {
-            "introspection.token.claim": "true",
-            "userinfo.token.claim": "true",
-            "user.attribute": "role",
-            "id.token.claim": "true",
-            "access.token.claim": "true",
-            "claim.name": "role",
-            "jsonType.label": "String"
-          }
-        },
-        {
-          "name": "org_id",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-usermodel-attribute-mapper",
-          "consentRequired": false,
-          "config": {
-            "introspection.token.claim": "true",
-            "userinfo.token.claim": "true",
-            "user.attribute": "org_id",
-            "id.token.claim": "true",
-            "access.token.claim": "true",
-            "claim.name": "org_id",
-            "jsonType.label": "String"
-          }
-        },
-        {
-          "name": "vehicle_set",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-usermodel-attribute-mapper",
-          "consentRequired": false,
-          "config": {
-            "introspection.token.claim": "true",
-            "userinfo.token.claim": "true",
-            "multivalued": "true",
-            "user.attribute": "vehicle_set",
-            "id.token.claim": "true",
-            "access.token.claim": "true",
-            "claim.name": "vehicle_set",
-            "jsonType.label": "String"
-          }
-        }
-      ]
-    },
-    {
-      "clientId": "fleet-api-service",
-      "enabled": true,
-      "publicClient": false,
-      "secret": "fleet-api-secret",
-      "serviceAccountsEnabled": true,
-      "directAccessGrantsEnabled": false,
-      "standardFlowEnabled": false,
-      "protocol": "openid-connect"
-    }
-  ],
-  "clientScopeMappings": {
-    "realm-management": [
-      {
-        "client": "fleet-api-service",
-        "roles": ["manage-users", "view-users", "query-users"]
-      }
-    ]
-  }
+  ]
 }

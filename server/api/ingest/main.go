@@ -1,99 +1,182 @@
-// telemetry-ingest: NATS subscriber → QuestDB batch writer.
+// telemetry-ingest: bridges NATS JetStream to QuestDB via ILP (InfluxDB Line Protocol).
 //
-// This service is the only component that writes raw telemetry to QuestDB.
-// It runs in the cloud Kubernetes cluster (not on relay nodes).
-//
-// Data flow:
-//   NATS cluster (telemetry.> subjects)
-//     → this service (fan-out consumer)
-//     → decode DataEnvelope from protobuf
-//     → accumulate into 100ms / 5000-message batches
-//     → write to QuestDB via ILP (InfluxDB Line Protocol over TCP)
-//
-// Throughput target: 25 MB/s sustained (1000 vehicles × 50Hz × ~500 bytes/envelope)
-// QuestDB can sustain >500k rows/sec on ILP — we are well within bounds.
-//
-// Scaling: multiple replicas use different NATS consumer group names.
-// NATS fan-out (core NATS, not JetStream) delivers to all replicas,
-// so all replicas receive all messages. Each replica writes a partition
-// of vehicles (partitioned by vehicle_id hash % replica_count).
-// For high throughput, deploy 4-8 replicas sharded by vehicle_id.
+// Consumes protobuf-encoded DataEnvelope messages from the "telemetry.>" NATS
+// subjects, converts them to QuestDB ILP lines, and writes in batches over TCP.
+// No HTTP endpoints except /healthz for Docker health checks.
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/nats-io/nats.go"
-	"github.com/systemscale/services/shared/storage"
+	"github.com/systemscale/services/shared/router"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Configuration (from environment variables for Kubernetes)
+// Configuration
 // ──────────────────────────────────────────────────────────────────────────────
 
 type config struct {
 	NATSUrl       string
-	QuestDBAddr   string        // host:9009
-	BatchSize     int           // flush at this many points
-	BatchInterval time.Duration // or this often
-	MetricsAddr   string
-	RegionID      string
+	QuestDBAddr   string
+	BatchSize     int
+	BatchInterval time.Duration
+	HTTPAddr      string
 }
 
 func loadConfig() config {
+	batchSize := 500
+	if s := os.Getenv("BATCH_SIZE"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			batchSize = n
+		}
+	}
+
+	batchInterval := 500 * time.Millisecond
+	if s := os.Getenv("BATCH_INTERVAL"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			batchInterval = d
+		}
+	}
+
 	return config{
 		NATSUrl:       envOr("NATS_URL", "nats://localhost:4222"),
 		QuestDBAddr:   envOr("QUESTDB_ADDR", "localhost:9009"),
-		BatchSize:     envIntOr("BATCH_SIZE", 5000),
-		BatchInterval: envDurOr("BATCH_INTERVAL", 100*time.Millisecond),
-		MetricsAddr:   envOr("METRICS_ADDR", ":9090"),
-		RegionID:      envOr("REGION_ID", "local"),
+		BatchSize:     batchSize,
+		BatchInterval: batchInterval,
+		HTTPAddr:      envOr("HTTP_ADDR", ":8085"),
 	}
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// DataEnvelope proto decoder (minimal — only extracts routing fields)
+// Main
 // ──────────────────────────────────────────────────────────────────────────────
 
-// dataEnvelope mirrors proto/core/envelope.proto field numbers.
-// We decode only the fields needed for QuestDB columns; the raw payload
-// is stored as-is for full fidelity archival.
-type dataEnvelope struct {
-	VehicleID   string  // field 1
-	TimestampNs uint64  // field 2
-	StreamType  int32   // field 3 (enum)
-	Payload     []byte  // field 4
-	Lat         float32 // field 5
-	Lon         float32 // field 6
-	AltM        float32 // field 7
-	Seq         uint32  // field 8
-	FleetID     string  // field 16 — project_id (set by SDK / local API)
-	OrgID       string  // field 17 — org_id (filled by relay from mTLS cert)
-	StreamName  string  // field 18 — custom sub-label (e.g. "lidar_front")
+func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	cfg := loadConfig()
+	slog.Info("starting telemetry-ingest",
+		"nats", cfg.NATSUrl,
+		"questdb", cfg.QuestDBAddr,
+		"batch_size", cfg.BatchSize,
+		"batch_interval", cfg.BatchInterval,
+	)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+
+	nr, err := router.NewNATSRouter(cfg.NATSUrl, "telemetry-ingest")
+	if err != nil {
+		slog.Error("NATS connect", "err", err)
+		os.Exit(1)
+	}
+	defer nr.Close()
+	slog.Info("NATS connected")
+
+	if err := nr.EnsureStream(ctx, "telemetry", []string{"telemetry.>"}); err != nil {
+		slog.Error("ensure telemetry stream", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("JetStream telemetry stream ready")
+
+	writer, err := newILPWriter(cfg.QuestDBAddr, cfg.BatchSize, cfg.BatchInterval)
+	if err != nil {
+		slog.Error("ILP writer init", "err", err)
+		os.Exit(1)
+	}
+	defer writer.Close()
+	slog.Info("QuestDB ILP writer ready")
+
+	ch, err := nr.Subscribe(ctx, "telemetry.>", router.SubOptions{Durable: "ingest-worker"})
+	if err != nil {
+		slog.Error("subscribe telemetry", "err", err)
+		os.Exit(1)
+	}
+
+	go processMessages(ch, writer)
+
+	httpServer := &http.Server{
+		Addr: cfg.HTTPAddr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, "ok")
+		}),
+	}
+	go func() {
+		slog.Info("ingest health check ready", "addr", cfg.HTTPAddr)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("health check serve", "err", err)
+		}
+	}()
+
+	slog.Info("telemetry-ingest ready")
+	<-ctx.Done()
+
+	slog.Info("shutting down telemetry-ingest")
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutCancel()
+	httpServer.Shutdown(shutCtx)
 }
 
-// decodeEnvelope decodes a DataEnvelope from raw protobuf bytes.
-// Uses manual proto decoding (no generated code needed here) for zero-alloc hot path.
-// Only decodes fields needed for storage metadata — payload bytes are kept as-is.
-func decodeEnvelope(data []byte) (*dataEnvelope, error) {
-	env := &dataEnvelope{}
-	var pos int
+func processMessages(ch <-chan *router.Message, writer *ilpWriter) {
+	var processed, errors uint64
+	for msg := range ch {
+		env, err := decodeDataEnvelope(msg.Data)
+		if err != nil {
+			slog.Warn("decode DataEnvelope", "err", err, "subject", msg.Subject)
+			errors++
+			continue
+		}
 
+		line := buildILPLine(env)
+		writer.Add(line)
+		processed++
+
+		if processed%10000 == 0 {
+			slog.Info("ingest progress", "processed", processed, "errors", errors)
+		}
+	}
+	slog.Info("message channel closed", "total_processed", processed, "total_errors", errors)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// DataEnvelope — manual protobuf decoding (matches proto/core/envelope.proto)
+// ──────────────────────────────────────────────────────────────────────────────
+
+type dataEnvelope struct {
+	VehicleID   string  // field 1  (wire type 2, string)
+	TimestampNs uint64  // field 2  (wire type 0, varint)
+	StreamType  uint64  // field 3  (wire type 0, varint)
+	Payload     []byte  // field 4  (wire type 2, bytes)
+	Lat         float64 // field 5  (wire type 1, double)
+	Lon         float64 // field 6  (wire type 1, double)
+	Alt         float32 // field 7  (wire type 5, float)
+	Seq         uint64  // field 8  (wire type 0, varint)
+	FleetID     string  // field 16 (wire type 2, string) — project_id
+	OrgID       string  // field 17 (wire type 2, string)
+	StreamName  string  // field 18 (wire type 2, string)
+}
+
+func decodeDataEnvelope(data []byte) (*dataEnvelope, error) {
+	env := &dataEnvelope{}
+	pos := 0
 	for pos < len(data) {
 		tag, n := consumeVarint(data[pos:])
 		if n == 0 {
-			break
+			return nil, fmt.Errorf("truncated tag at offset %d", pos)
 		}
 		pos += n
 		fieldNum := tag >> 3
@@ -103,61 +186,69 @@ func decodeEnvelope(data []byte) (*dataEnvelope, error) {
 		case 0: // varint
 			val, n2 := consumeVarint(data[pos:])
 			if n2 == 0 {
-				return nil, fmt.Errorf("truncated varint at field %d", fieldNum)
+				return nil, fmt.Errorf("truncated varint field %d", fieldNum)
 			}
 			pos += n2
 			switch fieldNum {
 			case 2:
 				env.TimestampNs = val
 			case 3:
-				env.StreamType = int32(val)
+				env.StreamType = val
 			case 8:
-				env.Seq = uint32(val)
+				env.Seq = val
 			}
-		case 1: // 64-bit
+
+		case 1: // 64-bit fixed (double)
 			if pos+8 > len(data) {
-				return nil, fmt.Errorf("truncated 64-bit field %d", fieldNum)
+				return nil, fmt.Errorf("truncated fixed64 field %d", fieldNum)
 			}
+			bits := binary.LittleEndian.Uint64(data[pos : pos+8])
 			pos += 8
-		case 2: // length-delimited
-			length, n2 := consumeVarint(data[pos:])
-			if n2 == 0 {
-				return nil, fmt.Errorf("truncated length at field %d", fieldNum)
-			}
-			pos += n2
-			if pos+int(length) > len(data) {
-				return nil, fmt.Errorf("truncated bytes field %d", fieldNum)
-			}
-			switch fieldNum {
-			case 1:
-				env.VehicleID = string(data[pos : pos+int(length)])
-			case 4:
-				env.Payload = data[pos : pos+int(length)]
-			case 16:
-				env.FleetID = string(data[pos : pos+int(length)])
-			case 17:
-				env.OrgID = string(data[pos : pos+int(length)])
-			case 18:
-				env.StreamName = string(data[pos : pos+int(length)])
-			}
-			pos += int(length)
-		case 5: // 32-bit
-			if pos+4 > len(data) {
-				return nil, fmt.Errorf("truncated 32-bit field %d", fieldNum)
-			}
-			bits := binary.LittleEndian.Uint32(data[pos : pos+4])
 			switch fieldNum {
 			case 5:
-				env.Lat = float32FromBits(bits)
+				env.Lat = math.Float64frombits(bits)
 			case 6:
-				env.Lon = float32FromBits(bits)
-			case 7:
-				env.AltM = float32FromBits(bits)
+				env.Lon = math.Float64frombits(bits)
 			}
+
+		case 2: // length-delimited (string, bytes)
+			length, n2 := consumeVarint(data[pos:])
+			if n2 == 0 {
+				return nil, fmt.Errorf("truncated length field %d", fieldNum)
+			}
+			pos += n2
+			end := pos + int(length)
+			if end > len(data) {
+				return nil, fmt.Errorf("truncated bytes field %d", fieldNum)
+			}
+			b := data[pos:end]
+			pos = end
+			switch fieldNum {
+			case 1:
+				env.VehicleID = string(b)
+			case 4:
+				env.Payload = append([]byte(nil), b...) // copy
+			case 16:
+				env.FleetID = string(b)
+			case 17:
+				env.OrgID = string(b)
+			case 18:
+				env.StreamName = string(b)
+			}
+
+		case 5: // 32-bit fixed (float)
+			if pos+4 > len(data) {
+				return nil, fmt.Errorf("truncated fixed32 field %d", fieldNum)
+			}
+			bits := binary.LittleEndian.Uint32(data[pos : pos+4])
 			pos += 4
+			switch fieldNum {
+			case 7:
+				env.Alt = math.Float32frombits(bits)
+			}
+
 		default:
-			// Unknown wire type — can't skip safely, abort
-			return nil, fmt.Errorf("unknown wire type %d at field %d", wireType, fieldNum)
+			return nil, fmt.Errorf("unsupported wire type %d at field %d", wireType, fieldNum)
 		}
 	}
 	return env, nil
@@ -171,247 +262,270 @@ func consumeVarint(data []byte) (uint64, int) {
 			return result, i + 1
 		}
 		if i >= 9 {
-			return 0, 0 // overflow
+			return 0, 0
 		}
 	}
 	return 0, 0
 }
 
-func float32FromBits(bits uint32) float32 {
-	return math.Float32frombits(bits)
+// ──────────────────────────────────────────────────────────────────────────────
+// ILP line builder
+// ──────────────────────────────────────────────────────────────────────────────
+
+var streamTypeNames = map[uint64]string{
+	1: "telemetry",
+	2: "event",
+	3: "sensor",
+	5: "log",
 }
 
-// streamTypeName converts a StreamType enum int32 to its string name.
-func streamTypeName(v int32) string {
-	switch v {
-	case 1:
-		return "telemetry"
-	case 2:
-		return "event"
-	case 3:
-		return "sensor"
-	case 4:
-		return "video_meta"
-	case 5:
-		return "log"
-	default:
-		return "unknown"
+func buildILPLine(env *dataEnvelope) []byte {
+	stName := streamTypeNames[env.StreamType]
+	if stName == "" {
+		stName = fmt.Sprintf("type_%d", env.StreamType)
+	}
+
+	var buf bytes.Buffer
+
+	// Measurement + tags (no spaces between tags)
+	buf.WriteString("telemetry,vehicle_id=")
+	buf.WriteString(escapeTagValue(env.VehicleID))
+	buf.WriteString(",stream_type=")
+	buf.WriteString(escapeTagValue(stName))
+	if env.FleetID != "" {
+		buf.WriteString(",project_id=")
+		buf.WriteString(escapeTagValue(env.FleetID))
+	}
+	if env.OrgID != "" {
+		buf.WriteString(",org_id=")
+		buf.WriteString(escapeTagValue(env.OrgID))
+	}
+	if env.StreamName != "" {
+		buf.WriteString(",stream_name=")
+		buf.WriteString(escapeTagValue(env.StreamName))
+	}
+
+	// Fields (space-separated from tags)
+	buf.WriteByte(' ')
+	buf.WriteString("lat=")
+	buf.WriteString(formatILPFloat(env.Lat))
+	buf.WriteString(",lon=")
+	buf.WriteString(formatILPFloat(env.Lon))
+	buf.WriteString(",alt_m=")
+	buf.WriteString(formatILPFloat(float64(env.Alt)))
+	buf.WriteString(",seq=")
+	buf.WriteString(strconv.FormatUint(env.Seq, 10))
+	buf.WriteByte('i')
+
+	if len(env.Payload) > 0 {
+		buf.WriteString(",payload_size=")
+		buf.WriteString(strconv.Itoa(len(env.Payload)))
+		buf.WriteByte('i')
+
+		buf.WriteString(",payload_json=\"")
+		buf.WriteString(escapeFieldString(string(env.Payload)))
+		buf.WriteByte('"')
+
+		if env.StreamType == 1 {
+			appendTelemetryFields(&buf, env.Payload)
+		}
+	}
+
+	// Timestamp in nanoseconds
+	buf.WriteByte(' ')
+	if env.TimestampNs > 0 {
+		buf.WriteString(strconv.FormatUint(env.TimestampNs, 10))
+	} else {
+		buf.WriteString(strconv.FormatInt(time.Now().UnixNano(), 10))
+	}
+
+	return buf.Bytes()
+}
+
+// appendTelemetryFields extracts battery_pct, speed_ms, heading from the JSON
+// payload and appends them as ILP fields for efficient querying in QuestDB.
+func appendTelemetryFields(buf *bytes.Buffer, payload []byte) {
+	var m map[string]interface{}
+	if json.Unmarshal(payload, &m) != nil {
+		return
+	}
+
+	if v, ok := m["battery_pct"]; ok {
+		if f, ok := toFloat64(v); ok {
+			buf.WriteString(",battery_pct=")
+			buf.WriteString(strconv.FormatInt(int64(f), 10))
+			buf.WriteByte('i')
+		}
+	}
+	if v, ok := m["speed_ms"]; ok {
+		if f, ok := toFloat64(v); ok {
+			buf.WriteString(",speed_ms=")
+			buf.WriteString(formatILPFloat(f))
+		}
+	}
+	if v, ok := m["heading"]; ok {
+		if f, ok := toFloat64(v); ok {
+			buf.WriteString(",heading=")
+			buf.WriteString(formatILPFloat(f))
+		}
 	}
 }
 
-// extractSDKPayload tries to JSON-decode the envelope payload and populate
-// hierarchical field columns and tag columns on the TelemetryPoint.
-//
-// SDK payloads are JSON objects like:
-//
-//	{"sensors/temp": 85.2, "nav/altitude": 102.3, "_tags": {"mission": "survey-1"}}
-//
-// Numeric values whose keys contain a "/" are stored as individual ILP field
-// columns with the slash replaced by "__" (enables fast range queries).
-// The "_tags" object keys become ILP tag columns (indexed, low-cardinality).
-// The full JSON blob is stored in PayloadJSON for arbitrary-key ad-hoc queries.
-//
-// Non-JSON payloads (e.g. raw MAVLink proto bytes) are silently skipped —
-// PayloadJSON remains empty and HierarchicalFields/Tags stay nil.
-func extractSDKPayload(payload []byte, point *storage.TelemetryPoint) {
-	if len(payload) == 0 || payload[0] != '{' {
-		return // not JSON object — skip silently (raw binary protocol payload)
+func toFloat64(v interface{}) (float64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return val, true
+	case float32:
+		return float64(val), true
+	case int:
+		return float64(val), true
+	case int64:
+		return float64(val), true
+	case json.Number:
+		f, err := val.Float64()
+		return f, err == nil
 	}
+	return 0, false
+}
 
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &obj); err != nil {
-		return // malformed JSON — leave hierarchical fields empty
+func formatILPFloat(v float64) string {
+	s := strconv.FormatFloat(v, 'f', -1, 64)
+	if !strings.Contains(s, ".") {
+		return s + ".0"
 	}
+	return s
+}
 
-	point.PayloadJSON = string(payload)
+func escapeTagValue(s string) string {
+	s = strings.ReplaceAll(s, " ", "\\ ")
+	s = strings.ReplaceAll(s, ",", "\\,")
+	s = strings.ReplaceAll(s, "=", "\\=")
+	return s
+}
 
-	for k, raw := range obj {
-		if k == "_tags" {
-			// Extract tag columns: {"mission": "survey-1", "env": "prod"}
-			var tags map[string]string
-			if err := json.Unmarshal(raw, &tags); err == nil {
-				point.Tags = tags
+func escapeFieldString(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\"", "\\\"")
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	s = strings.ReplaceAll(s, "\r", "\\r")
+	return s
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ILP TCP writer — batched writes to QuestDB
+// ──────────────────────────────────────────────────────────────────────────────
+
+type ilpWriter struct {
+	addr          string
+	conn          net.Conn
+	mu            sync.Mutex
+	buf           bytes.Buffer
+	count         int
+	batchSize     int
+	batchInterval time.Duration
+	ticker        *time.Ticker
+	done          chan struct{}
+}
+
+func newILPWriter(addr string, batchSize int, batchInterval time.Duration) (*ilpWriter, error) {
+	w := &ilpWriter{
+		addr:          addr,
+		batchSize:     batchSize,
+		batchInterval: batchInterval,
+		done:          make(chan struct{}),
+	}
+	if err := w.connect(); err != nil {
+		return nil, fmt.Errorf("ILP connect %s: %w", addr, err)
+	}
+	w.ticker = time.NewTicker(batchInterval)
+	go w.flushLoop()
+	return w, nil
+}
+
+func (w *ilpWriter) connect() error {
+	conn, err := net.DialTimeout("tcp", w.addr, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	w.conn = conn
+	return nil
+}
+
+// Add appends an ILP line to the buffer and flushes if the batch is full.
+func (w *ilpWriter) Add(line []byte) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf.Write(line)
+	w.buf.WriteByte('\n')
+	w.count++
+	if w.count >= w.batchSize {
+		w.flush()
+	}
+}
+
+// flush writes the buffered ILP lines to QuestDB over TCP.
+// Retries up to 3 times with reconnection on failure; drops batch if exhausted.
+// Caller must hold w.mu.
+func (w *ilpWriter) flush() {
+	if w.count == 0 {
+		return
+	}
+	data := make([]byte, w.buf.Len())
+	copy(data, w.buf.Bytes())
+
+	for attempt := 0; attempt < 3; attempt++ {
+		if w.conn == nil {
+			if err := w.connect(); err != nil {
+				slog.Error("ILP reconnect failed", "err", err, "attempt", attempt+1)
+				time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+				continue
 			}
-			continue
 		}
 
-		// Only index numeric values with slash-separated keys as columns.
-		// String/bool/nested values are already preserved in PayloadJSON.
-		if !strings.Contains(k, "/") {
-			continue
-		}
-		var v float64
-		if err := json.Unmarshal(raw, &v); err != nil {
-			continue // not a number — skip column, still in PayloadJSON
-		}
-		if point.HierarchicalFields == nil {
-			point.HierarchicalFields = make(map[string]float64)
-		}
-		point.HierarchicalFields[k] = v
-	}
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Ingest pipeline
-// ──────────────────────────────────────────────────────────────────────────────
-
-type ingestService struct {
-	nc      *nats.Conn
-	writer  storage.StorageWriter
-	cfg     config
-	metrics *ingestMetrics
-}
-
-type ingestMetrics struct {
-	messagesReceived int64
-	batchesWritten   int64
-	decodeErrors     int64
-}
-
-func (s *ingestService) run(ctx context.Context) error {
-	batch := storage.NewBatchAccumulator(s.cfg.BatchSize, s.cfg.BatchInterval)
-
-	// Ticker for time-based flush when message rate is low
-	ticker := time.NewTicker(s.cfg.BatchInterval)
-	defer ticker.Stop()
-
-	// NATS subscription on telemetry.> (wildcard, all vehicles and stream types)
-	// Core NATS (not JetStream) — ephemeral, highest throughput, no persistence needed here
-	sub, err := s.nc.Subscribe("telemetry.>", func(msg *nats.Msg) {
-		env, err := decodeEnvelope(msg.Data)
-		if err != nil {
-			s.metrics.decodeErrors++
-			slog.Warn("envelope decode error", "err", err, "subject", msg.Subject)
+		w.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		_, err := w.conn.Write(data)
+		if err == nil {
+			w.buf.Reset()
+			w.count = 0
 			return
 		}
 
-		point := storage.TelemetryPoint{
-			VehicleID:   env.VehicleID,
-			ProjectID:   env.FleetID,
-			OrgID:       env.OrgID,
-			StreamName:  env.StreamName,
-			Timestamp:   time.Unix(0, int64(env.TimestampNs)),
-			StreamType:  streamTypeName(env.StreamType),
-			Lat:         env.Lat,
-			Lon:         env.Lon,
-			AltM:        env.AltM,
-			SeqNum:      env.Seq,
-			PayloadSize: len(env.Payload),
-			Payload:     env.Payload,
-		}
-
-		// For SDK-originated JSON payloads (telemetry, sensor, event, log stream types),
-		// extract hierarchical keys and tags for first-class QuestDB column storage.
-		extractSDKPayload(env.Payload, &point)
-
-		s.metrics.messagesReceived++
-
-		if points, ready := batch.Add(point); ready {
-			if err := s.writer.WriteBatch(ctx, points); err != nil {
-				slog.Error("QuestDB batch write failed", "err", err, "size", len(points))
-				// On failure: points are dropped. The ring buffer on relay nodes
-				// holds the source data; a catch-up consumer can replay if needed.
-				// JetStream is not used here because 50Hz telemetry doesn't need persistence.
-			} else {
-				s.metrics.batchesWritten++
-			}
-		}
-	})
-	if err != nil {
-		return fmt.Errorf("NATS subscribe telemetry.>: %w", err)
+		slog.Error("ILP write failed", "err", err, "attempt", attempt+1)
+		w.conn.Close()
+		w.conn = nil
 	}
-	defer sub.Unsubscribe()
 
-	slog.Info("telemetry-ingest running",
-		"nats", s.cfg.NATSUrl,
-		"questdb", s.cfg.QuestDBAddr,
-		"batch_size", s.cfg.BatchSize,
-		"batch_interval", s.cfg.BatchInterval,
-	)
+	slog.Error("ILP flush failed after retries, dropping batch", "lines", w.count)
+	w.buf.Reset()
+	w.count = 0
+}
 
-	// Time-based flush loop (handles low-rate vehicles)
+func (w *ilpWriter) flushLoop() {
 	for {
 		select {
-		case <-ctx.Done():
-			// Flush remaining points on shutdown
-			remaining := batch.Drain()
-			if len(remaining) > 0 {
-				if err := s.writer.WriteBatch(context.Background(), remaining); err != nil {
-					slog.Error("final flush failed", "err", err)
-				}
-			}
-			return nil
-		case <-ticker.C:
-			// Flush any accumulated points that haven't hit the size threshold
-			if points := batch.Drain(); len(points) > 0 {
-				if err := s.writer.WriteBatch(ctx, points); err != nil {
-					slog.Error("timed batch write failed", "err", err, "size", len(points))
-				} else {
-					s.metrics.batchesWritten++
-				}
-			}
+		case <-w.ticker.C:
+			w.mu.Lock()
+			w.flush()
+			w.mu.Unlock()
+		case <-w.done:
+			return
 		}
 	}
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Main
-// ──────────────────────────────────────────────────────────────────────────────
-
-func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-
-	cfg := loadConfig()
-	slog.Info("Starting telemetry-ingest", "region", cfg.RegionID)
-
-	// Prometheus metrics endpoint (basic — use prometheus/client_golang in production)
-	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "# systemscale telemetry-ingest metrics\n")
-		fmt.Fprintf(w, "up 1\n")
-	})
-	go http.ListenAndServe(cfg.MetricsAddr, nil)
-
-	// NATS connection (reconnect forever)
-	nc, err := nats.Connect(cfg.NATSUrl,
-		nats.Name("telemetry-ingest"),
-		nats.MaxReconnects(-1),
-		nats.ReconnectWait(500*time.Millisecond),
-	)
-	if err != nil {
-		slog.Error("NATS connect failed", "url", cfg.NATSUrl, "err", err)
-		os.Exit(1)
+func (w *ilpWriter) Close() {
+	close(w.done)
+	w.ticker.Stop()
+	w.mu.Lock()
+	w.flush()
+	w.mu.Unlock()
+	if w.conn != nil {
+		w.conn.Close()
 	}
-	defer nc.Close()
-
-	// QuestDB writer
-	writer, err := storage.NewQuestDBWriter(cfg.QuestDBAddr)
-	if err != nil {
-		slog.Error("QuestDB connect failed", "addr", cfg.QuestDBAddr, "err", err)
-		os.Exit(1)
-	}
-	defer writer.Close()
-
-	svc := &ingestService{
-		nc:      nc,
-		writer:  writer,
-		cfg:     cfg,
-		metrics: &ingestMetrics{},
-	}
-
-	// Graceful shutdown on SIGTERM / SIGINT
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer cancel()
-
-	if err := svc.run(ctx); err != nil {
-		slog.Error("ingest service error", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("telemetry-ingest shutdown complete")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Config helpers
+// Utility
 // ──────────────────────────────────────────────────────────────────────────────
 
 func envOr(key, def string) string {
@@ -420,28 +534,3 @@ func envOr(key, def string) string {
 	}
 	return def
 }
-
-func envIntOr(key string, def int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	var n int
-	if _, err := fmt.Sscan(v, &n); err != nil {
-		return def
-	}
-	return n
-}
-
-func envDurOr(key string, def time.Duration) time.Duration {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		return def
-	}
-	return d
-}
-
