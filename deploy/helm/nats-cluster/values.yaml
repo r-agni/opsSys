@@ -1,0 +1,117 @@
+# NATS JetStream cluster — 5-node raft quorum
+# Deployed on: AWS r6i.4xlarge (16 vCPU, 128 GB RAM, NVMe)
+# Topology: 3 in us-east-1, 1 in eu-west-1, 1 in ap-southeast-1 (geo-aware raft)
+
+global:
+  image:
+    registry: nats
+    tag: "2.10-alpine"
+
+cluster:
+  enabled: true
+  replicas: 5
+  name: systemscale
+
+nats:
+  jetstream:
+    enabled: true
+    memStorage:
+      enabled: true
+      size: "32Gi"    # 32 GB in-memory store for hot subjects
+    fileStorage:
+      enabled: true
+      size: "500Gi"   # 500 GB on NVMe for persistent JetStream store
+      storageClassName: "gp3-fast"
+
+  config:
+    # JetStream configuration
+    jetstream:
+      max_memory_store: 34359738368   # 32 GB
+      max_file_store:   536870912000  # 500 GB
+
+    # Cluster configuration — raft consensus
+    cluster:
+      name: systemscale
+      routes:
+        - "nats://nats-0.nats.default.svc:6222"
+        - "nats://nats-1.nats.default.svc:6222"
+        - "nats://nats-2.nats.default.svc:6222"
+        - "nats://nats-3.nats.default.svc:6222"
+        - "nats://nats-4.nats.default.svc:6222"
+
+    # Leaf node configuration — relay nodes connect as leaf nodes
+    leafnodes:
+      enabled: true
+      port: 7422
+      # Leaf nodes authenticate with a pre-shared token (rotated by Vault)
+      authorization:
+        timeout: 5
+
+    # Accounts for multi-tenancy (org isolation at protocol level)
+    accounts:
+      $SYS:
+        users:
+          - { user: sys, password: "${NATS_SYS_PASSWORD}" }
+      # Per-org accounts defined via NATS CLI / operator tooling
+
+    # Limits
+    max_payload:       2097152   # 2 MB max message (large enough for any envelope)
+    max_connections:   100000    # 1000 vehicles × 4 streams + services
+    write_deadline:    "5s"
+
+resources:
+  requests:
+    cpu: "8"
+    memory: "64Gi"
+  limits:
+    cpu: "16"
+    memory: "128Gi"
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 3  # raft needs 3/5 for quorum
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: nats
+        topologyKey: kubernetes.io/hostname
+
+# Prometheus monitoring
+prometheus:
+  enabled: true
+  port: 8222
+
+# Streams to pre-create at startup (via nats-box init container)
+streams:
+  - name: telemetry
+    subjects: ["telemetry.>"]
+    storage: file
+    max_age: "72h"           # 3-day retention for catch-up replay
+    max_bytes: 107374182400  # 100 GB cap (rolling window)
+    num_replicas: 3
+    retention: limits
+    discard: old
+
+  - name: command
+    subjects: ["command.>"]
+    storage: file
+    max_age: "168h"          # 7-day retention (for audit log)
+    num_replicas: 3
+    retention: limits
+    discard: new             # reject new commands if storage full (prevents unbounded growth)
+    duplicate_window: "2m"   # 2-minute dedup window (matches CommandEnvelope TTL)
+
+  - name: event
+    subjects: ["event.>"]
+    storage: file
+    max_age: "720h"          # 30-day event retention
+    num_replicas: 5          # replicate to all nodes for event durability
+    retention: limits

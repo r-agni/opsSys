@@ -1,0 +1,54 @@
+# telemetry-ingest deployment
+# Scale trigger: QuestDB ILP write latency > 50ms (HPA on custom metric)
+
+replicaCount: 4   # 4 replicas, each handles 250 vehicles at 50Hz
+
+image:
+  repository: systemscale/telemetry-ingest
+  tag: "latest"
+
+env:
+  NATS_URL: "nats://nats.default.svc:4222"
+  QUESTDB_ADDR: "questdb-primary.internal:9009"
+  BATCH_SIZE: "5000"
+  BATCH_INTERVAL: "100ms"
+  REGION_ID: "us-east"
+
+resources:
+  requests:
+    cpu: "2"
+    memory: "512Mi"
+  limits:
+    cpu: "4"
+    memory: "1Gi"
+
+autoscaling:
+  enabled: true
+  minReplicas: 4
+  maxReplicas: 16
+  # Scale on NATS subscription lag (custom metric from NATS exporter)
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: nats_consumer_lag
+          selector:
+            matchLabels:
+              consumer: telemetry-ingest
+        target:
+          type: AverageValue
+          averageValue: "10000"  # scale up if lag > 10k messages
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 3
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: telemetry-ingest
+          topologyKey: kubernetes.io/hostname

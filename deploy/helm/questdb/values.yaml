@@ -1,0 +1,72 @@
+# QuestDB StatefulSet
+# Runs on: r6i.8xlarge (32 vCPU, 256 GB RAM, io2 8 TB SSD)
+# Deployed as EC2 for direct NVMe access. This Helm chart is for any
+# Kubernetes-adjacent tooling; actual QuestDB runs on the bare EC2 instance.
+
+replicaCount: 1
+
+image:
+  repository: questdb/questdb
+  tag: "8.0.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  ports:
+    ilp: 9009       # InfluxDB Line Protocol over TCP (from telemetry-ingest)
+    http: 9000      # REST API + Web UI
+    pg: 8812        # PostgreSQL wire protocol (from query-api)
+
+config:
+  server.conf: |
+    # Performance: maximize ILP ingestion throughput
+    # QuestDB WAL (Write-Ahead Log) for crash recovery without sacrificing ingestion speed
+    cairo.wal.enabled=true
+    cairo.wal.writer.data.append.page.size=33554432   # 32 MB WAL segment
+    cairo.wal.purge.interval=30000
+
+    # Table writer configuration for high-frequency ILP writes
+    cairo.writer.command.queue.capacity=4096
+
+    # Shared worker threads: should match (vCPU count / 2) for optimal SIMD query perf
+    shared.worker.count=16
+
+    # ILP listener
+    line.tcp.enabled=true
+    line.tcp.net.active.connection.limit=1000
+    line.tcp.recv.buffer.size=67108864    # 64 MB receive buffer (matches sysctl)
+    line.tcp.maintenance.job.interval=100
+
+    # HTTP + Postgres listener
+    http.enabled=true
+    pg.enabled=true
+
+    # Partitioning: by DAY (enables efficient time-range pruning for queries)
+    # All tables use PARTITION BY DAY automatically via CREATE TABLE ... PARTITION BY DAY
+
+    # Memory: allocate 80% of RAM to QuestDB (leave OS + page cache some headroom)
+    ram.percent.used.for.cache=80
+
+persistence:
+  enabled: true
+  storageClass: "io2-high-iops"
+  size: "7Ti"         # 7 TB (matches r6i.8xlarge io2 volume)
+  accessMode: ReadWriteOnce
+
+resources:
+  requests:
+    cpu: "28"          # leave 4 cores for OS
+    memory: "240Gi"    # leave 16 GB for OS
+  limits:
+    cpu: "32"
+    memory: "256Gi"
+
+# Node selector: schedule only on the QuestDB-dedicated EC2 instance
+nodeSelector:
+  role: questdb
+
+tolerations:
+  - key: "dedicated"
+    operator: "Equal"
+    value: "questdb"
+    effect: "NoSchedule"

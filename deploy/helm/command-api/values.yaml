@@ -1,0 +1,54 @@
+# command-api — gRPC bidirectional streaming command service
+
+replicaCount: 3
+
+image:
+  repository: systemscale/command-api
+  tag: "latest"
+
+service:
+  type: ClusterIP
+  port: 50051
+  protocol: TCP
+
+# gRPC load balancing: use headless service + client-side load balancing
+# (gRPC is HTTP/2 — L7 load balancing via Envoy/Istio is required for proper distribution)
+headlessService:
+  enabled: true
+
+env:
+  GRPC_ADDR: ":50051"
+  NATS_URL: "nats://nats.default.svc:4222"
+  JWKS_URL: "https://keycloak.internal/realms/systemscale/protocol/openid-connect/certs"
+  METRICS_ADDR: ":9090"
+  REGION_ID: "us-east"
+
+resources:
+  requests:
+    cpu: "2"
+    memory: "512Mi"
+  limits:
+    cpu: "4"
+    memory: "2Gi"   # gRPC streaming: each operator stream holds open connection
+
+# HPA: scale on active gRPC streams (one per operator session)
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+# Istio/Envoy sidecar for gRPC L7 load balancing
+podAnnotations:
+  sidecar.istio.io/inject: "true"
+  traffic.sidecar.istio.io/includeInboundPorts: "50051"
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2

@@ -1,0 +1,48 @@
+# Ansible inventory for SystemScale relay nodes
+# Copy to inventory.ini and fill in actual IPs
+# Use Tailscale or AWS SSM for SSH access (no public SSH port on relay nodes)
+
+[relay_nodes]
+# US-East
+relay-us-east-1a ansible_host=10.10.1.10 region_id=us-east az=us-east-1a
+relay-us-east-1b ansible_host=10.10.1.11 region_id=us-east az=us-east-1b
+relay-us-east-1c ansible_host=10.10.1.12 region_id=us-east az=us-east-1c
+
+# US-West
+relay-us-west-2a ansible_host=10.20.1.10 region_id=us-west az=us-west-2a
+relay-us-west-2b ansible_host=10.20.1.11 region_id=us-west az=us-west-2b
+relay-us-west-2c ansible_host=10.20.1.12 region_id=us-west az=us-west-2c
+
+# EU-West (Amsterdam)
+relay-eu-west-1a ansible_host=10.30.1.10 region_id=eu-west az=eu-west-1a
+relay-eu-west-1b ansible_host=10.30.1.11 region_id=eu-west az=eu-west-1b
+relay-eu-west-1c ansible_host=10.30.1.12 region_id=eu-west az=eu-west-1c
+
+# South Asia (Mumbai) — critical for India operations
+relay-ap-south-1a ansible_host=10.40.1.10 region_id=ap-south az=ap-south-1a
+relay-ap-south-1b ansible_host=10.40.1.11 region_id=ap-south az=ap-south-1b
+relay-ap-south-1c ansible_host=10.40.1.12 region_id=ap-south az=ap-south-1c
+
+# East Asia (Singapore)
+relay-ap-southeast-1a ansible_host=10.50.1.10 region_id=ap-southeast az=ap-southeast-1a
+relay-ap-southeast-1b ansible_host=10.50.1.11 region_id=ap-southeast az=ap-southeast-1b
+relay-ap-southeast-1c ansible_host=10.50.1.12 region_id=ap-southeast az=ap-southeast-1c
+
+# Middle East (Dubai)
+relay-me-south-1a ansible_host=10.60.1.10 region_id=me-south az=me-south-1a
+relay-me-south-1b ansible_host=10.60.1.11 region_id=me-south az=me-south-1b
+
+[relay_nodes:vars]
+ansible_user=ec2-user
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+relay_cpu_affinity=4-31
+
+[relay_us_east]
+relay-us-east-1a
+relay-us-east-1b
+relay-us-east-1c
+
+[relay_ap_south]
+relay-ap-south-1a
+relay-ap-south-1b
+relay-ap-south-1c

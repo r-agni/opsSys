@@ -1,0 +1,250 @@
+# SystemScale — local development Docker Compose
+#
+# Usage:
+#   1. Build service images:
+#        docker compose -f deploy/docker/docker-compose.dev.yml build
+#
+#   2. Start infrastructure:
+#        docker compose -f deploy/docker/docker-compose.dev.yml up -d nats questdb cockroachdb keycloak
+#        # Wait ~30s for CockroachDB and Keycloak to initialize
+#
+#   3. Start app services:
+#        docker compose -f deploy/docker/docker-compose.dev.yml up -d
+#
+#   4. Run the dashboard:
+#        cd dashboard && npm run dev   # → http://localhost:5173
+#
+# After Keycloak starts, configure the realm via http://localhost:8180/admin
+#   Admin credentials: admin / admin
+#   Create realm: systemscale
+#   Create client: systemscale-dashboard  (public, PKCE, redirect http://localhost:5173/*)
+#   Add user attributes: org_id, vehicle_set (JSON array), role
+#   Update JWKS_URLS below to point at the configured realm.
+#
+# Service ports:
+#   4222  NATS
+#   8080  fleet service REST
+#   8081  query service REST
+#   8082  commands service HTTP REST
+#   8083  auth service REST
+#   8084  ws-gateway WebSocket
+#   8180  Keycloak admin UI
+#   9000  QuestDB HTTP query
+#   9009  QuestDB ILP (telemetry write)
+#   26257 CockroachDB SQL (postgres wire)
+#   8090  CockroachDB admin UI
+
+version: "3.9"
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# ── Infrastructure ─────────────────────────────────────────────────────────────
+
+services:
+  nats:
+    <<: *service-defaults
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222", "--cluster_name", "systemscale-dev"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"   # NATS HTTP monitoring
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  questdb:
+    <<: *service-defaults
+    image: questdb/questdb:7.4.0
+    ports:
+      - "9000:9000"   # HTTP query + REST API
+      - "9009:9009"   # ILP (InfluxDB Line Protocol) ingestion
+      - "8812:8812"   # PostgreSQL wire protocol (used by query service via lib/pq)
+    volumes:
+      - questdb-data:/var/lib/questdb
+    environment:
+      QDB_METRICS_ENABLED: "true"
+      QDB_TELEMETRY_ENABLED: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9000'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  cockroachdb:
+    <<: *service-defaults
+    image: cockroachdb/cockroach:v24.1.3
+    entrypoint: ["/cockroach/cockroach"]
+    command: ["start-single-node", "--insecure", "--listen-addr=0.0.0.0:26257", "--http-addr=0.0.0.0:8090", "--advertise-addr=cockroachdb:26257"]
+    ports:
+      - "26257:26257"   # PostgreSQL wire protocol
+      - "8090:8090"     # CockroachDB admin UI
+    volumes:
+      - cockroach-data:/cockroach/cockroach-data
+    healthcheck:
+      test: ["CMD", "cockroach", "sql", "--insecure", "--host=localhost:26257", "--execute=SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  # One-shot container: creates the 'systemscale' database once CockroachDB is healthy
+  cockroach-init:
+    image: cockroachdb/cockroach:v24.1.3
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c", "cockroach sql --insecure --host=cockroachdb:26257 --execute='CREATE DATABASE IF NOT EXISTS systemscale;'"]
+
+  keycloak:
+    <<: *service-defaults
+    image: quay.io/keycloak/keycloak:24.0.3
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HTTP_PORT: "8080"
+    ports:
+      - "8180:8080"
+    volumes:
+      - ./keycloak-theme:/opt/keycloak/themes/systemscale:ro
+      - keycloak-data:/opt/keycloak/data
+      - ./keycloak-realm-import.json:/opt/keycloak/data/import/systemscale-realm.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080'"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+# ── App services ───────────────────────────────────────────────────────────────
+
+  fleet:
+    <<: *service-defaults
+    build:
+      context: ../../api
+      dockerfile: fleet/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: "postgresql://root@cockroachdb:26257/systemscale?sslmode=disable"
+      JWKS_URLS: >-
+        http://keycloak:8080/realms/systemscale/protocol/openid-connect/certs,
+        http://auth:8083/.well-known/jwks.json
+      CORS_ALLOW_ORIGIN: "http://localhost:5173"
+      RELAY_ADDR: "relay.systemscale.io:443"
+      REGION_ID: "local-dev"
+      KEYCLOAK_URL: "http://keycloak:8080"
+      KEYCLOAK_REALM: "systemscale"
+      KEYCLOAK_CLIENT_ID: "fleet-api-service"
+      KEYCLOAK_CLIENT_SECRET: "fleet-api-secret"
+    depends_on:
+      cockroach-init:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+
+  query:
+    <<: *service-defaults
+    build:
+      context: ../../api
+      dockerfile: query/Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      HTTP_ADDR: ":8081"
+      QUESTDB_DSN: "user=admin password=quest host=questdb port=8812 dbname=qdb sslmode=disable"
+      JWKS_URL: "http://keycloak:8080/realms/systemscale/protocol/openid-connect/certs"
+      CORS_ALLOW_ORIGIN: "http://localhost:5173"
+      REGION_ID: "local-dev"
+    depends_on:
+      questdb:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+
+  commands:
+    <<: *service-defaults
+    build:
+      context: ../../api
+      dockerfile: commands/Dockerfile
+    ports:
+      - "8082:8082"   # HTTP REST (browser clients)
+      - "9090:9090"   # gRPC (edge agents)
+    environment:
+      GRPC_ADDR: ":9090"
+      HTTP_REST_ADDR: ":8082"
+      NATS_URL: "nats://nats:4222"
+      JWKS_URL: "http://keycloak:8080/realms/systemscale/protocol/openid-connect/certs"
+      CORS_ALLOW_ORIGIN: "http://localhost:5173"
+      REGION_ID: "local-dev"
+    depends_on:
+      nats:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+
+  auth:
+    <<: *service-defaults
+    build:
+      context: ../../api
+      dockerfile: auth/Dockerfile
+    ports:
+      - "8083:8083"
+    environment:
+      HTTP_ADDR: ":8083"
+      DATABASE_URL: "postgresql://root@cockroachdb:26257/systemscale?sslmode=disable"
+      JWKS_URLS: "http://keycloak:8080/realms/systemscale/protocol/openid-connect/certs"
+      CORS_ALLOW_ORIGIN: "http://localhost:5173"
+      # SIGNING_KEY_PATH not set → generates ephemeral RSA key (fine for dev)
+    depends_on:
+      cockroach-init:
+        condition: service_completed_successfully
+
+  ingest:
+    <<: *service-defaults
+    build:
+      context: ../../api
+      dockerfile: ingest/Dockerfile
+    environment:
+      NATS_URL: "nats://nats:4222"
+      QUESTDB_ADDR: "questdb:9009"
+      BATCH_SIZE: "500"
+      BATCH_INTERVAL: "500ms"
+    depends_on:
+      nats:
+        condition: service_healthy
+      questdb:
+        condition: service_healthy
+
+  ws-gateway:
+    <<: *service-defaults
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.relay
+    ports:
+      - "8084:8084"     # WebSocket (operator dashboard)
+      - "9091:9091"     # Prometheus metrics
+    volumes:
+      - ./ws-gateway.dev.yaml:/etc/systemscale/ws-gateway.yaml:ro
+    environment:
+      SYSTEMSCALE_WS_CONFIG: "/etc/systemscale/ws-gateway.yaml"
+      RUST_LOG: "info"
+    depends_on:
+      nats:
+        condition: service_healthy
+
+# ── Volumes ────────────────────────────────────────────────────────────────────
+
+volumes:
+  questdb-data:
+  cockroach-data:
+  keycloak-data:

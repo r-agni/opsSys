@@ -1,0 +1,68 @@
+# Keycloak — OIDC provider for operator authentication
+# Multi-region active-active: primary in us-east-1, replicas in eu-west-1 + ap-southeast-1
+# All replicas share same database (CockroachDB geo-partitioned)
+
+image:
+  repository: quay.io/keycloak/keycloak
+  tag: "25.0"
+
+# Production: run with 3 replicas for HA
+replicaCount: 3
+
+env:
+  KC_DB: postgres
+  KC_DB_URL: "jdbc:postgresql://cockroachdb.internal:26257/keycloak?ssl=true"
+  KC_DB_USERNAME: keycloak
+  # KC_DB_PASSWORD from Kubernetes secret
+  KC_HOSTNAME: "auth.systemscale.io"
+  KC_HOSTNAME_STRICT: "false"
+  KC_PROXY: "edge"           # TLS terminated by ingress
+  KC_METRICS_ENABLED: "true"
+  KC_HEALTH_ENABLED: "true"
+  KC_LOG_LEVEL: "INFO"
+  KC_CACHE: "ispn"           # Infinispan distributed cache (cross-pod session sharing)
+  KC_CACHE_STACK: "kubernetes"
+
+# Realm configuration (applied via keycloak-config-cli init job):
+# Realm: systemscale
+# Clients: command-api (confidential), fleet-api (public), operator-dashboard (SPA)
+# Roles: viewer, operator, admin
+# Custom claims mapper: adds org_id, vehicle_set, role to JWT
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "128k"   # JWT tokens can be large
+  hosts:
+    - host: auth.systemscale.io
+      paths:
+        - path: /
+  tls:
+    - secretName: keycloak-tls
+      hosts: [auth.systemscale.io]
+
+resources:
+  requests:
+    cpu: "2"
+    memory: "2Gi"
+  limits:
+    cpu: "4"
+    memory: "4Gi"
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: keycloak
+        topologyKey: kubernetes.io/hostname
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2

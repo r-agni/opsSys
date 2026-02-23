@@ -1,0 +1,234 @@
+---
+# SystemScale Relay Node — Kernel and Network Tuning
+#
+# This playbook tunes every relay node for maximum QUIC/UDP throughput and
+# minimum latency. Without these settings, the relay cannot meet latency
+# SLAs regardless of code quality.
+#
+# Run: ansible-playbook -i inventory.ini udp-tuning.yml
+#
+# Prerequisites:
+#   - Amazon Linux 2023 or Ubuntu 22.04 (kernel 5.15+)
+#   - io_uring: kernel 5.10+ required (check with `uname -r`)
+#   - c6in.8xlarge with ENA Express (pre-checked in preflight task)
+#
+# What this does:
+#   1. Maximize UDP socket buffer sizes (QUIC receive burst capacity)
+#   2. Enable SO_REUSEPORT multi-queue (one QUIC socket per CPU core)
+#   3. Tune TCP for NATS ILP connections (QuestDB batched writes)
+#   4. Configure CPU pinning (relay hot path on isolated cores)
+#   5. Set NVMe queue depth for SRT ring buffer I/O
+#   6. Disable unnecessary kernel features that add latency
+
+- name: SystemScale relay kernel tuning
+  hosts: relay_nodes
+  become: yes
+  vars:
+    relay_cpu_count: 32  # c6in.8xlarge has 32 vCPUs
+    # Cores 0-3: reserved for OS, NATS leaf, monitoring
+    # Cores 4-31: relay hot path (QUIC receive + NATS publish)
+    relay_cpu_affinity: "4-31"
+
+  tasks:
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Preflight checks
+    # ──────────────────────────────────────────────────────────────────────────
+
+    - name: Check kernel version supports io_uring (5.10+)
+      shell: |
+        kernel=$(uname -r | cut -d. -f1,2 | tr -d .)
+        if [ "$kernel" -lt "510" ]; then
+          echo "FAIL: kernel $(uname -r) does not support io_uring (need 5.10+)"
+          exit 1
+        fi
+        echo "OK: kernel $(uname -r)"
+      register: kernel_check
+      changed_when: false
+
+    - name: Assert kernel check passed
+      assert:
+        that: kernel_check.rc == 0
+        fail_msg: "{{ kernel_check.stdout }}"
+
+    - name: Check ENA Express driver is loaded
+      shell: ethtool -i eth0 | grep driver | grep -q ena
+      changed_when: false
+      register: ena_check
+      failed_when: ena_check.rc != 0
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Sysctl: UDP socket buffer sizes
+    # ──────────────────────────────────────────────────────────────────────────
+    # These allow QUIC to buffer up to 128 MB of incoming UDP packets per socket.
+    # Default Linux values (212992 bytes) cause packet drops at high vehicle counts.
+    # At 1000 vehicles × 50Hz × 500 bytes = 25 MB/s burst — need 128 MB headroom.
+
+    - name: Configure kernel network parameters
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_file: /etc/sysctl.d/99-systemscale-relay.conf
+        reload: yes
+      loop:
+        # UDP receive buffer: 128 MB per socket
+        - { key: net.core.rmem_max,           value: "134217728" }
+        - { key: net.core.rmem_default,        value: "134217728" }
+        # UDP send buffer: 64 MB (relay sends commands + ACKs)
+        - { key: net.core.wmem_max,           value: "67108864" }
+        - { key: net.core.wmem_default,        value: "67108864" }
+        # Backlog queue: accept() queue depth for new connections
+        - { key: net.core.somaxconn,           value: "65535" }
+        - { key: net.core.netdev_max_backlog,  value: "250000" }
+        # TCP tuning for NATS leaf connections
+        - { key: net.ipv4.tcp_rmem,           value: "4096 87380 134217728" }
+        - { key: net.ipv4.tcp_wmem,           value: "4096 65536 67108864" }
+        - { key: net.ipv4.tcp_congestion_control, value: "bbr" }  # BBR for NATS backbone
+        - { key: net.core.default_qdisc,      value: "fq" }       # required for BBR
+        - { key: net.ipv4.tcp_fastopen,        value: "3" }        # TFO for NATS reconnect
+        - { key: net.ipv4.tcp_slow_start_after_idle, value: "0" } # don't slow NATS on idle
+        # UDP: disable checksum offload conflict (ENA handles checksums in hardware)
+        - { key: net.ipv4.udp_rmem_min,       value: "8192" }
+        # IPv6: enable for QUIC dual-stack
+        - { key: net.ipv6.conf.all.disable_ipv6, value: "0" }
+        # SO_REUSEPORT: allow multiple QUIC sockets on same port (one per CPU core)
+        # This is enabled in-application (setsockopt) — kernel just needs to allow it
+        # No sysctl needed; SO_REUSEPORT is always available on Linux 3.9+
+        # Virtual memory: huge pages for NATS + QUIC connection tables
+        - { key: vm.nr_hugepages,             value: "1024" }  # 2 MB pages = 2 GB
+        - { key: vm.swappiness,               value: "1" }      # minimize swap latency
+        # File descriptors: 1000 vehicles = 4000+ fds (4 streams per vehicle)
+        - { key: fs.file-max,                 value: "2097152" }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Sysctl: io_uring permissions
+    # ──────────────────────────────────────────────────────────────────────────
+
+    - name: Enable io_uring for non-root users (locked_pin_kb)
+      sysctl:
+        name: kernel.perf_event_paranoid
+        value: "1"
+        sysctl_file: /etc/sysctl.d/99-systemscale-relay.conf
+        reload: yes
+
+    # io_uring memory locking limit (must be high enough for large ring buffers)
+    - name: Set io_uring memlock limit for relay user
+      blockinfile:
+        path: /etc/security/limits.d/99-systemscale.conf
+        create: yes
+        block: |
+          systemscale soft memlock unlimited
+          systemscale hard memlock unlimited
+          systemscale soft nofile 2097152
+          systemscale hard nofile 2097152
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # CPU: isolate relay hot-path cores from OS scheduler
+    # ──────────────────────────────────────────────────────────────────────────
+
+    - name: Add isolcpus to kernel boot parameters
+      lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX='
+        line: >
+          GRUB_CMDLINE_LINUX="isolcpus={{ relay_cpu_affinity }}
+          nohz_full={{ relay_cpu_affinity }}
+          rcu_nocbs={{ relay_cpu_affinity }}
+          transparent_hugepage=always
+          intel_pstate=active"
+      notify: update grub
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # NVMe: optimize queue depth for SRT ring buffer I/O
+    # ──────────────────────────────────────────────────────────────────────────
+
+    - name: Set NVMe queue depth and scheduler
+      shell: |
+        for dev in /sys/block/nvme*n*; do
+          echo none > $dev/queue/scheduler   # none = best for NVMe SSDs (no software reorder)
+          echo 1024 > $dev/queue/nr_requests # queue depth: default 64, set to 1024 for SRT writes
+          echo 0    > $dev/queue/rotational  # confirm SSD (disables readahead for latency)
+        done
+      changed_when: false
+
+    - name: Persist NVMe settings via udev rule
+      copy:
+        dest: /etc/udev/rules.d/99-nvme-tuning.rules
+        content: |
+          ACTION=="add|change", KERNEL=="nvme*n*", ATTR{queue/scheduler}="none"
+          ACTION=="add|change", KERNEL=="nvme*n*", ATTR{queue/nr_requests}="1024"
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # IRQ affinity: pin network card interrupts to non-relay cores
+    # ──────────────────────────────────────────────────────────────────────────
+
+    - name: Install irqbalance and configure for relay topology
+      package:
+        name: irqbalance
+        state: present
+
+    - name: Configure irqbalance to avoid relay cores
+      copy:
+        dest: /etc/default/irqbalance
+        content: |
+          # Ban relay hot-path cores from IRQ handling
+          # IRQs go to cores 0-3 (OS cores)
+          IRQBALANCE_BANNED_CPUS="{{ relay_cpu_affinity }}"
+          IRQBALANCE_ARGS="--hintpolicy=exact"
+      notify: restart irqbalance
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Disable NUMA balancing (c6in.8xlarge is single-NUMA, this adds overhead)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    - name: Disable NUMA balancing
+      sysctl:
+        name: kernel.numa_balancing
+        value: "0"
+        sysctl_file: /etc/sysctl.d/99-systemscale-relay.conf
+        reload: yes
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Systemd service limits
+    # ──────────────────────────────────────────────────────────────────────────
+
+    - name: Create systemscale relay service override
+      copy:
+        dest: /etc/systemd/system/systemscale-relay.service.d/limits.conf
+        content: |
+          [Service]
+          LimitNOFILE=2097152
+          LimitMEMLOCK=infinity
+          CPUAffinity={{ relay_cpu_affinity }}
+          IOSchedulingClass=realtime
+          IOSchedulingPriority=0
+      notify: daemon-reload
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Validation
+    # ──────────────────────────────────────────────────────────────────────────
+
+    - name: Validate UDP buffer size was applied
+      shell: sysctl net.core.rmem_max | grep -q 134217728
+      changed_when: false
+      failed_when: false
+      register: buf_check
+
+    - name: Report tuning results
+      debug:
+        msg: |
+          Relay kernel tuning complete.
+          UDP recv buffer: {{ '134217728 (128 MB) ✓' if buf_check.rc == 0 else 'NOT APPLIED - reboot required' }}
+          io_uring: kernel {{ ansible_kernel }} ({{ 'supported' if ansible_kernel_version | version_compare('5.10', '>=') else 'UPGRADE REQUIRED' }})
+          CPU isolation: cores {{ relay_cpu_affinity }} reserved for relay hot path
+
+  handlers:
+    - name: update grub
+      shell: update-grub || grub2-mkconfig -o /boot/grub2/grub.cfg
+
+    - name: restart irqbalance
+      service: name=irqbalance state=restarted
+
+    - name: daemon-reload
+      systemd: daemon_reload=yes

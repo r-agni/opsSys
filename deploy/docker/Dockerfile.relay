@@ -1,0 +1,51 @@
+# Build context: repo root (.)
+# Usage: docker build -f infra/docker/Dockerfile.relay -t relay:latest .
+#
+# Optional build arg for cross-compilation target (default: native x86_64 Linux).
+# For ARM64: --build-arg TARGET=aarch64-unknown-linux-gnu
+ARG TARGET=x86_64-unknown-linux-gnu
+
+FROM rust:latest AS builder
+ARG TARGET
+
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy workspace manifests first to cache dependency downloads
+COPY relay/Cargo.toml relay/Cargo.lock ./
+COPY relay/relay-core/Cargo.toml        ./relay-core/Cargo.toml
+COPY relay/ws-gateway/Cargo.toml        ./ws-gateway/Cargo.toml
+COPY relay/srt-relay/Cargo.toml         ./srt-relay/Cargo.toml
+COPY relay/command-forwarder/Cargo.toml ./command-forwarder/Cargo.toml
+
+# Create stub lib.rs / main.rs for each member so cargo can fetch deps
+RUN mkdir -p relay-core/src ws-gateway/src srt-relay/src command-forwarder/src && \
+    echo "fn main() {}" > relay-core/src/main.rs && \
+    echo "fn main() {}" > ws-gateway/src/main.rs && \
+    echo "fn main() {}" > srt-relay/src/main.rs && \
+    echo "fn main() {}" > command-forwarder/src/main.rs
+
+# Fetch and compile dependencies (this layer is cached until Cargo.toml changes)
+RUN cargo fetch && \
+    cargo build --release --bin systemscale-ws-gateway 2>/dev/null || true
+
+# Copy actual source and force recompilation by removing stub fingerprints
+COPY relay/ ./
+RUN touch ws-gateway/src/main.rs
+
+# Build the real binary (only recompiles what changed)
+RUN cargo build --release --bin systemscale-ws-gateway
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/systemscale-ws-gateway /ws-gateway
+
+ENTRYPOINT ["/ws-gateway"]
