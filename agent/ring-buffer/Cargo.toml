@@ -1,0 +1,13 @@
+[package]
+name    = "ring-buffer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+adapter-trait = { path = "../protocol-adapters/adapter-trait" }
+tokio         = { workspace = true }
+bytes         = { workspace = true }
+anyhow        = { workspace = true }
+tracing       = { workspace = true }
+serde         = { workspace = true }
+memmap2       = "0.9"

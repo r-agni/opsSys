@@ -1,0 +1,19 @@
+[package]
+name    = "quic-transport"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+adapter-trait = { path = "../protocol-adapters/adapter-trait" }
+ring-buffer   = { path = "../ring-buffer" }
+tokio         = { workspace = true }
+tokio-util    = { workspace = true }
+bytes         = { workspace = true }
+quinn         = { workspace = true }
+rustls        = { workspace = true }
+anyhow        = { workspace = true }
+thiserror     = { workspace = true }
+tracing       = { workspace = true }
+futures       = { workspace = true }
+serde          = { workspace = true }
+rustls-pemfile = { workspace = true }

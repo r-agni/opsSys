@@ -1,0 +1,44 @@
+# SystemScale Edge Agent — example configuration
+# Copy to /etc/systemscale/agent.yaml and fill in your values.
+# Override config file path: SYSTEMSCALE_CONFIG=/path/to/config.yaml
+
+vehicle_id: "vehicle-550e8400-e29b-41d4-a716-446655440000"   # UUID v4, unique per vehicle
+log_level: "info"   # trace | debug | info | warn | error
+
+# ── Protocol adapter ──────────────────────────────────────────────────────────
+# Which adapter to use for communicating with vehicle hardware.
+# mavlink_udp: connects to mavlink-router UDP output (most common)
+# mavlink_serial: direct serial connection to flight controller
+# ros2: subscribes to ROS2 DDS topics
+# custom_unix: reads DataEnvelope protos from Unix domain socket
+adapter: mavlink_udp
+
+mavlink:
+  vehicle_id: "vehicle-550e8400-e29b-41d4-a716-446655440000"  # must match top-level
+  connection:
+    udp:
+      addr: "127.0.0.1:14550"  # mavlink-router UDP output
+  gcs_system_id:    255   # GCS system ID (255 = ground station)
+  gcs_component_id: 190   # Component ID for edge agent
+
+# ── QUIC transport ────────────────────────────────────────────────────────────
+quic:
+  relay_addr:     "185.199.108.153:443"  # Replace with Anycast relay IP
+  relay_hostname: "relay.systemscale.io" # SNI hostname for TLS
+  cert_path:      "/etc/systemscale/certs/vehicle.pem"
+  key_path:       "/etc/systemscale/certs/vehicle.key"
+  ca_cert_path:   "/etc/systemscale/certs/relay-ca.pem"
+  initial_backoff_ms: 250
+  max_backoff_ms:     30000
+  heartbeat_interval_s: 10
+
+# ── Ring buffer ───────────────────────────────────────────────────────────────
+ring_buffer:
+  path:               "/var/lib/systemscale/ringbuf.bin"
+  capacity_bytes:     536870912  # 512 MB
+  slot_size:          4096       # Max bytes per DataEnvelope
+  replay_multiplier:  5          # Catch-up speed after reconnect
+
+# ── Metrics ───────────────────────────────────────────────────────────────────
+metrics:
+  bind_addr: "0.0.0.0:9090"   # Prometheus scrape endpoint

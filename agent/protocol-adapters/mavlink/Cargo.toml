@@ -1,0 +1,22 @@
+[package]
+name    = "mavlink-adapter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+adapter-trait = { path = "../adapter-trait" }
+tokio         = { workspace = true }
+futures       = { workspace = true }
+bytes         = { workspace = true }
+prost         = { workspace = true }
+anyhow        = { workspace = true }
+thiserror     = { workspace = true }
+async-stream  = { workspace = true }
+tracing       = { workspace = true }
+mavlink       = { workspace = true }
+chrono        = { workspace = true }
+serde         = { workspace = true }
+num-traits    = "0.2"
+
+[build-dependencies]
+prost-build = "0.13"

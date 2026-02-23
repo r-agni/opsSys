@@ -1,0 +1,79 @@
+[workspace]
+resolver = "2"
+members = [
+    "agent-core",
+    "protocol-adapters/adapter-trait",
+    "protocol-adapters/mavlink",
+    "protocol-adapters/custom-unix",
+    "quic-transport",
+    "ring-buffer",
+    "video-sender",
+]
+
+[workspace.dependencies]
+# Async runtime
+tokio       = { version = "1", features = ["full"] }
+tokio-util  = { version = "0.7", features = ["codec"] }
+
+# QUIC transport
+quinn = { version = "0.11", features = ["rustls"] }
+rustls = { version = "0.23", features = ["ring"] }
+
+# Serialization — protobuf
+prost       = "0.13"
+prost-types = "0.13"
+
+# Zero-copy byte buffers
+bytes = "1"
+
+# Error handling
+anyhow  = "1"
+thiserror = "2"
+
+# Logging / tracing
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3", features = ["env-filter", "json"] }
+
+# Configuration
+serde       = { version = "1", features = ["derive"] }
+serde_yaml  = "0.9"
+config      = "0.14"
+
+# Async streams
+futures       = "0.3"
+async-stream  = "0.3"
+
+# Concurrency primitives
+crossbeam-channel = "0.5"
+parking_lot       = "1"
+
+# MAVLink
+mavlink = { version = "0.14", features = ["ardupilotmega"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID (v7 for time-ordered command IDs)
+uuid = { version = "1", features = ["v7", "v4"] }
+
+# Metrics
+metrics             = "0.23"
+metrics-exporter-prometheus = "0.15"
+
+# JSON (for SDK log() frames and local HTTP API)
+serde_json = "1"
+
+# HTTP server for local ingest API (axum, tokio-native)
+axum       = { version = "0.7", features = ["tokio"] }
+
+# TLS certificate parsing (PEM → DER for rustls)
+rustls-pemfile = "2"
+
+# Hex encoding for non-UTF-8 command payloads in SSE stream
+hex = "0.4"
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+panic         = "abort"
