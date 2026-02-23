@@ -77,6 +77,14 @@ class MessageSender:
         self._command_api = (command_api or "").rstrip("/")
         self._apikey_url  = (apikey_url  or "").rstrip("/")
         self._fleet_api   = (fleet_api   or "").rstrip("/")
+        self._agentless:       bool = False
+        self._warned_agentless: bool = False
+
+    def set_agentless(self, value: bool) -> None:
+        """Switch agentless mode on/off. Called by Client when agent availability changes."""
+        self._agentless = value
+        if not value:
+            self._warned_agentless = False
 
     def send(
         self,
@@ -121,6 +129,15 @@ class MessageSender:
         level: str,
         data:  dict | None,
     ) -> None:
+        if self._agentless:
+            if not self._warned_agentless:
+                logger.warning(
+                    "systemscale: agentless mode — alert/event '%s' not delivered "
+                    "(no local agent). Will deliver when agent becomes available.",
+                    message,
+                )
+                self._warned_agentless = True
+            return
         from ..core.transport import post_with_retry
         payload: dict[str, Any] = {
             "_event_type": 101,   # EVENT_TYPE_ALERT
@@ -166,16 +183,16 @@ class MessageSender:
         # Resolve vehicle_id from "device:name" target
         vehicle_id = ""
         if to and to.startswith("device:"):
-            device_name = to[len("device:"):]
-            vehicle_id  = self._resolve_vehicle_id(device_name, token)
+            service_name = to[len("device:"):]
+            vehicle_id   = self._resolve_vehicle_id(service_name, token)
 
+        _priority_int = {"normal": 0, "high": 1, "emergency": 2}.get(priority, 0)
         resp = post_json(
             f"{self._command_api}/v1/commands",
             {
                 "vehicle_id":   vehicle_id,
                 "command_type": command_type,
-                "data":         data or {},
-                "priority":     priority,
+                "priority":     _priority_int,
                 "ttl_ms":       int(timeout * 1000),
             },
             headers=headers,

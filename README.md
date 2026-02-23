@@ -11,23 +11,24 @@ Vehicles → [Edge Agent] → QUIC → [Relay] → NATS → [Cloud APIs] → [Da
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
 | Edge | Rust (agent/) | Telemetry collection, command dispatch, ring buffer |
-| Relay | Rust (relay/) | QUIC server, WebSocket gateway, NATS bridge |
-| Cloud | Go (api/) | Fleet CRUD, telemetry queries, auth, command dispatch |
-| Frontend | React + TypeScript (dashboard/) | Operator web UI |
+| Relay | Rust (server/relay/) | QUIC server, WebSocket gateway, NATS bridge |
+| Cloud | Go (server/api/) | Fleet CRUD, telemetry queries, auth, command dispatch |
+| Frontend | React + TypeScript (server/dashboard/) | Operator web UI |
 | SDKs | Python + Go (sdk/) | Device-side integration libraries |
 
 ## Directory Layout
 
 ```
-agent/       Rust edge agent (runs on each vehicle)
-relay/       Rust relay services (ws-gateway, QUIC server, SRT)
-api/         Go microservices (fleet, query, commands, auth, ingest)
-dashboard/   React 19 SPA (Vite + TypeScript)
-sdk/         Python and Go SDKs for device integration
-proto/       Protobuf definitions (DataEnvelope, CommandEnvelope)
-deploy/      Docker Compose, Terraform, Helm charts, Ansible
-docs/        Deployment guide, data formats, hardware integration
-scripts/     Dev utilities (seed fleet, simulate telemetry, test SDK)
+agent/          Rust edge agent (runs on each vehicle)
+sdk/            Python and Go SDKs for device integration
+server/
+  api/          Go microservices (fleet, query, commands, auth, ingest)
+  relay/        Rust relay services (ws-gateway, QUIC server, SRT)
+  dashboard/    React 19 SPA (Vite + TypeScript)
+infra/          Docker Compose, Terraform, Helm charts, Ansible
+proto/          Protobuf definitions (DataEnvelope, CommandEnvelope)
+docs/           Deployment guide, data formats, hardware integration
+scripts/        Dev utilities (seed fleet, simulate telemetry, test SDK)
 ```
 
 ## Service Ports
@@ -56,10 +57,10 @@ make dev-up
 
 # 2. Build and run cloud services
 make build-api
-# Run each: go run ./api/fleet, ./api/query, ./api/commands, ./api/auth, ./api/ingest
+# Run each: go run ./server/api/fleet, ./server/api/query, etc.
 
 # 3. Start dashboard
-cd dashboard && npm install && npm run dev
+cd server/dashboard && npm install && npm run dev
 
 # 4. Seed test data
 python scripts/seed_fleet.py

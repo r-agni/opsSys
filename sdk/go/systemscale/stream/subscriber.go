@@ -146,9 +146,9 @@ func ReceiveFrames(
 	return ch, nil
 }
 
-// ResolveVehicleIDs looks up vehicle IDs for a project (and optionally device)
+// ResolveVehicleIDs looks up vehicle IDs for a project (and optionally service)
 // using the fleet-api.
-func ResolveVehicleIDs(fleetAPI, project, device, token string) ([]string, error) {
+func ResolveVehicleIDs(fleetAPI, project, service, token string) ([]string, error) {
 	u := fmt.Sprintf("%s/v1/projects/%s/devices",
 		strings.TrimRight(fleetAPI, "/"),
 		url.PathEscape(project),
@@ -181,7 +181,7 @@ func ResolveVehicleIDs(fleetAPI, project, device, token string) ([]string, error
 
 	var ids []string
 	for _, d := range out.Devices {
-		if device == "" || d.DisplayName == device {
+		if service == "" || d.DisplayName == service {
 			ids = append(ids, d.ID)
 		}
 	}

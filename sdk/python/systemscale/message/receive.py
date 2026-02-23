@@ -108,10 +108,15 @@ class MessageReceiver:
         self._handler_lock = threading.Lock()
         self._thread:      threading.Thread | None = None
         self._stopped      = False
+        self._agentless:   bool = False
 
         # Pending assistance requests: request_id → (Event, result_list)
         self._pending:      dict[str, tuple[threading.Event, list]] = {}
         self._pending_lock  = threading.Lock()
+
+    def set_agentless(self, value: bool) -> None:
+        """Switch agentless mode on/off. Called by Client when agent availability changes."""
+        self._agentless = value
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -198,6 +203,9 @@ class MessageReceiver:
         url     = f"{self._agent_api}/v1/commands"
         backoff = 0.25
         while not self._stopped:
+            if self._agentless:
+                time.sleep(5.0)
+                continue
             try:
                 req = urllib.request.Request(
                     url,

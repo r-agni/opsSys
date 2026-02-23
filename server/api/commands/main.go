@@ -141,7 +141,7 @@ func (s *CommandServiceServer) SendCommand(stream grpc.BidiStreamingServer[Comma
 
 	// ACK subscriber: listens on command.*.ack and routes to the right pending channel
 	// We subscribe to all ACKs and filter by command_id (simpler than per-vehicle subs)
-	ackCh, err := s.router.Subscribe(ctx, "command.>.ack")
+	ackCh, err := s.router.Subscribe(ctx, "command.*.ack")
 	if err != nil {
 		return status.Errorf(codes.Internal, "subscribe ACK: %v", err)
 	}
@@ -345,7 +345,7 @@ func newRestServer(msgRouter router.MessageRouter, validator *auth.Validator) *r
 // startACKListener subscribes to command.*.ack and populates the ACK map.
 // ACKs are kept for 5 minutes then expired by a background ticker.
 func (rs *restServer) startACKListener(ctx context.Context) error {
-	ackCh, err := rs.msgRouter.Subscribe(ctx, "command.>.ack")
+	ackCh, err := rs.msgRouter.Subscribe(ctx, "command.*.ack")
 	if err != nil {
 		return fmt.Errorf("subscribe ACK: %w", err)
 	}
@@ -657,6 +657,13 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
+	// Ensure JetStream "command" stream exists (idempotent)
+	if err := msgRouter.EnsureStream(ctx, "command", []string{"command.>"}); err != nil {
+		slog.Error("ensure command stream", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("JetStream command stream ready")
+
 	// HTTP REST server — browsers cannot use raw gRPC
 	rest := newRestServer(msgRouter, validator)
 	if err := rest.startACKListener(ctx); err != nil {
@@ -687,8 +694,10 @@ func main() {
 	)
 
 	// Register CommandService
-	// In production: use generated registration from buf output
-	// grpcpb.RegisterCommandServiceServer(grpcServer, &CommandServiceServer{...})
+	// Run `make proto` to generate the gRPC service stubs from proto/core/command_service.proto,
+	// then replace this stub with: grpcpb.RegisterCommandServiceServer(grpcServer, &CommandServiceServer{...})
+	// For now the gRPC server starts but has no services — use the HTTP REST API at HTTPRestAddr.
+	slog.Warn("gRPC CommandService not registered — requires proto generation (make proto). Use HTTP REST at " + cfg.HTTPRestAddr)
 	_ = &CommandServiceServer{router: msgRouter, regionID: cfg.RegionID}
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)

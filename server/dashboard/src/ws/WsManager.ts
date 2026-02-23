@@ -123,6 +123,13 @@ class WsManager {
         useTelemetryStore.getState().push(frame.vehicle_id, frame)
       } else if (frame.type === 'alert') {
         useAlertStore.getState().push(frame)
+      } else if (frame.type === 'assistance_request') {
+        useAlertStore.getState().push({
+          type: 'alert',
+          device: frame.device,
+          level: 'warning',
+          message: `Assistance requested: ${frame.reason}`,
+        })
       }
     }
 

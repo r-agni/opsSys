@@ -16,11 +16,11 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /build
 
 # Copy workspace manifests first to cache dependency downloads
-COPY relay/Cargo.toml relay/Cargo.lock ./
-COPY relay/relay-core/Cargo.toml        ./relay-core/Cargo.toml
-COPY relay/ws-gateway/Cargo.toml        ./ws-gateway/Cargo.toml
-COPY relay/srt-relay/Cargo.toml         ./srt-relay/Cargo.toml
-COPY relay/command-forwarder/Cargo.toml ./command-forwarder/Cargo.toml
+COPY server/relay/Cargo.toml server/relay/Cargo.lock ./
+COPY server/relay/relay-core/Cargo.toml        ./relay-core/Cargo.toml
+COPY server/relay/ws-gateway/Cargo.toml        ./ws-gateway/Cargo.toml
+COPY server/relay/srt-relay/Cargo.toml         ./srt-relay/Cargo.toml
+COPY server/relay/command-forwarder/Cargo.toml ./command-forwarder/Cargo.toml
 
 # Create stub lib.rs / main.rs for each member so cargo can fetch deps
 RUN mkdir -p relay-core/src ws-gateway/src srt-relay/src command-forwarder/src && \
@@ -34,7 +34,7 @@ RUN cargo fetch && \
     cargo build --release --bin systemscale-ws-gateway 2>/dev/null || true
 
 # Copy actual source and force recompilation by removing stub fingerprints
-COPY relay/ ./
+COPY server/relay/ ./
 RUN touch ws-gateway/src/main.rs
 
 # Build the real binary (only recompiles what changed)

@@ -28,13 +28,13 @@ def provision(
     *,
     api_key:   str,
     project:   str,
-    device:    str,
+    service:   str,
     apikey_url: str,
     fleet_api:  str,
     agent_api:  str,
 ) -> None:
     """
-    Provision a new device and start the edge agent.
+    Provision a new service and start the edge agent.
 
     Steps:
     1. Exchange API key → JWT via apikey-service
@@ -45,14 +45,14 @@ def provision(
 
     :raises RuntimeError: If any step fails.
     """
-    logger.info("Provisioning device '%s' in project '%s'", device, project)
+    logger.info("Provisioning service '%s' in project '%s'", service, project)
 
     # ── Step 1: Exchange API key for JWT ──────────────────────────────────────
     jwt = _exchange_token(api_key, apikey_url)
     logger.info("Token obtained from apikey-service")
 
-    # ── Step 2: Call fleet-api to provision device ────────────────────────────
-    bundle = _provision_device(jwt, project, device, fleet_api)
+    # ── Step 2: Call fleet-api to provision service ───────────────────────────
+    bundle = _provision_device(jwt, project, service, fleet_api)
     logger.info("Device provisioned: id=%s", bundle.get("device_id"))
 
     # ── Step 3: Write config and certs ────────────────────────────────────────
@@ -85,10 +85,10 @@ def _exchange_token(api_key: str, apikey_url: str) -> str:
     return data["token"]
 
 
-def _provision_device(jwt: str, project: str, device: str, fleet_api: str) -> dict:
+def _provision_device(jwt: str, project: str, service: str, fleet_api: str) -> dict:
     import urllib.parse
     url  = f"{fleet_api.rstrip('/')}/v1/projects/{urllib.parse.quote(project)}/devices"
-    body = json.dumps({"display_name": device}).encode()
+    body = json.dumps({"display_name": service}).encode()
     req  = urllib.request.Request(
         url, data=body, method="POST",
         headers={

@@ -41,7 +41,7 @@ def exchange_token(api_key: str, apikey_url: str) -> str:
     except Exception as e:
         raise RuntimeError(f"Token exchange failed: {e}") from e
 
-    token = data["token"]
+    token = data.get("access_token") or data["token"]
     ttl   = data.get("expires_in", 3600)
     # Re-exchange 45 minutes before expiry
     with _lock:

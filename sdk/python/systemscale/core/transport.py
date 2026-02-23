@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -16,6 +17,21 @@ import urllib.request
 from typing import Any
 
 logger = logging.getLogger("systemscale")
+
+
+def _resolve_url(explicit: str | None, env_var: str, default: str) -> str:
+    """
+    Resolve a service URL with three-tier priority:
+      1. Explicit kwarg value (non-None, non-empty)
+      2. Environment variable named by *env_var*
+      3. Hardcoded *default*
+    """
+    if explicit:
+        return explicit.rstrip("/")
+    from_env = os.environ.get(env_var, "").strip()
+    if from_env:
+        return from_env.rstrip("/")
+    return default.rstrip("/")
 
 
 def post_with_retry(

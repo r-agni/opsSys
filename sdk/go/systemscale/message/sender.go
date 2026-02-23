@@ -177,7 +177,8 @@ func (s *MessageSender) sendCommand(cmdType string, o sendOpt) (*CommandResult, 
 
 	vehicleID := ""
 	if strings.HasPrefix(o.to, "device:") {
-		vehicleID, _ = s.resolveVehicleID(strings.TrimPrefix(o.to, "device:"), token)
+		serviceName := strings.TrimPrefix(o.to, "device:")
+		vehicleID, _ = s.resolveVehicleID(serviceName, token)
 	}
 
 	postBody, _ := json.Marshal(map[string]any{

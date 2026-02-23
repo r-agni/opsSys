@@ -29,19 +29,19 @@ class AssistanceRequest:
     def __init__(
         self,
         request_id: str,
-        device:     str,
+        service:    str,
         reason:     str,
         *,
         _client: "OperatorClient",
     ) -> None:
         self.request_id = request_id
-        self.device     = device
+        self.service    = service
         self.reason     = reason
         self._client    = _client
         self._responded = False
 
     def approve(self, instruction: str = "") -> None:
-        """Approve the request and optionally provide instructions to the device."""
+        """Approve the request and optionally provide instructions to the service."""
         self._respond(approved=True, instruction=instruction)
 
     def deny(self, reason: str = "") -> None:
@@ -63,8 +63,8 @@ class AssistanceRequest:
 class DataRow:
     """A single row returned by :meth:`OperatorClient.query`."""
 
-    def __init__(self, device: str, timestamp: str, fields: dict[str, Any]) -> None:
-        self.device    = device
+    def __init__(self, service: str, timestamp: str, fields: dict[str, Any]) -> None:
+        self.service   = service
         self.timestamp = timestamp
         self.fields    = fields
 
@@ -81,7 +81,7 @@ class OperatorClient:
       discrete command sending via the cloud REST API.
 
     All existing method signatures (``query``, ``subscribe``,
-    ``send_command``, ``assistance_requests``, ``devices``) are
+    ``send_command``, ``assistance_requests``, ``services``) are
     preserved for backward compatibility.
     """
 
@@ -113,8 +113,8 @@ class OperatorClient:
 
     # ── Backward-compatible operator API ──────────────────────────────────────
 
-    def devices(self) -> list[dict]:
-        """List all devices in the project."""
+    def services(self) -> list[dict]:
+        """List all services (devices) in the project."""
         resp = get_json(
             f"{self._fleet_api}/v1/projects/{urllib.parse.quote(self._project)}/devices",
             headers=self._auth_headers(),
@@ -124,7 +124,7 @@ class OperatorClient:
     def query(
         self,
         *,
-        device:    str | None       = None,
+        service:   str | None       = None,
         keys:      list[str] | None = None,
         start:     str              = "-1h",
         end:       str | None       = None,
@@ -134,7 +134,7 @@ class OperatorClient:
         """
         Query historical telemetry from QuestDB.
 
-        :param device:    Device name to filter (None = all in project).
+        :param service:   Service name to filter (None = all in project).
         :param keys:      Hierarchical keys to return, e.g. ``["sensors/temp"]``.
         :param start:     QuestDB time expression, e.g. ``"-1h"``, ``"2024-01-01"``.
         :param end:       End time (defaults to now).
@@ -146,7 +146,7 @@ class OperatorClient:
             "start":   start,
             "limit":   str(limit),
         }
-        if device:    params["device"]    = device
+        if service:   params["device"]    = service
         if end:       params["end"]       = end
         if sample_by: params["sample_by"] = sample_by
         if keys:      params["keys"]      = ",".join(k.replace("/", "__") for k in keys)
@@ -160,7 +160,7 @@ class OperatorClient:
                 if k not in ("device_id", "timestamp", "stream_type")
             }
             rows.append(DataRow(
-                device    = r.get("device_id", ""),
+                service   = r.get("device_id", ""),
                 timestamp = r.get("timestamp", ""),
                 fields    = fields,
             ))
@@ -169,20 +169,20 @@ class OperatorClient:
     def subscribe(
         self,
         *,
-        device:  str | None       = None,
+        service: str | None       = None,
         streams: list[str] | None = None,
     ) -> Generator[DataFrame, None, None]:
         """
         Subscribe to real-time telemetry via WebSocket.
 
-        :param device:  Device name (None = all in project).
+        :param service: Service name (None = all in project).
         :param streams: Stream types, e.g. ``["telemetry", "event"]``.
         """
-        return self.stream.receive(device=device, streams=streams)
+        return self.stream.receive(service=service, streams=streams)
 
     def send_command(
         self,
-        device:   str,
+        service:  str,
         *,
         cmd_type: str,
         data:     dict | None = None,
@@ -190,9 +190,9 @@ class OperatorClient:
         timeout:  float       = 30.0,
     ) -> CommandResult:
         """
-        Send a command to a device and wait for its ACK.
+        Send a command to a service and wait for its ACK.
 
-        :param device:   Target device name.
+        :param service:  Target service name.
         :param cmd_type: Command type string (e.g. ``"goto"``).
         :param data:     Arbitrary command payload.
         :param priority: ``"normal"`` | ``"high"`` | ``"emergency"``.
@@ -200,7 +200,7 @@ class OperatorClient:
         """
         return self.message.send(
             cmd_type,
-            to       = f"device:{device}",
+            to       = f"device:{service}",
             type     = "command",
             data     = data,
             priority = priority,
@@ -228,7 +228,7 @@ class OperatorClient:
                         seen.add(rid)
                         yield AssistanceRequest(
                             request_id = rid,
-                            device     = item.get("device_id", ""),
+                            service    = item.get("device_id", ""),
                             reason     = item.get("reason", ""),
                             _client    = self,
                         )

@@ -8,18 +8,18 @@
 //	})
 //
 //	rows, _ := ops.Query(ctx, systemscale.QueryRequest{
-//	    Device: "drone-001",
-//	    Keys:   []string{"sensors/temp"},
-//	    Start:  "-1h",
+//	    Service: "drone-001",
+//	    Keys:    []string{"sensors/temp"},
+//	    Start:   "-1h",
 //	})
 //
 //	ch, _ := ops.Subscribe(ctx, "drone-001", nil)
 //	for frame := range ch { fmt.Println(frame.Fields) }
 //
 //	ops.SendCommand(ctx, systemscale.CommandRequest{
-//	    Device: "drone-001",
-//	    Type:   "goto",
-//	    Data:   map[string]any{"lat": 28.6, "lon": 77.2},
+//	    Service: "drone-001",
+//	    Type:    "goto",
+//	    Data:    map[string]any{"lat": 28.6, "lon": 77.2},
 //	})
 //
 //	arCh, _ := ops.AssistanceRequests(ctx)
@@ -109,8 +109,8 @@ func (c *OperatorConfig) applyDefaults() {
 
 // QueryRequest specifies parameters for a historical telemetry query.
 type QueryRequest struct {
-	// Device filters by device name. Empty means all devices in the project.
-	Device string
+	// Service filters by service name. Empty means all services in the project.
+	Service string
 	// Keys is a list of slash-separated field keys to return (e.g. "sensors/temp").
 	// Empty returns all fields.
 	Keys []string
@@ -127,22 +127,22 @@ type QueryRequest struct {
 // DataRow is one row returned by Query().
 type DataRow struct {
 	Timestamp time.Time      `json:"ts"`
-	Device    string         `json:"device"`
+	Service   string         `json:"device"`
 	Fields    map[string]any `json:"fields"`
 }
 
 // DataFrame is a live telemetry frame received from Subscribe().
 type DataFrame struct {
 	Timestamp time.Time
-	Device    string
+	Service   string
 	Stream    string
 	Fields    map[string]any
 }
 
-// CommandRequest specifies a command to dispatch to a device.
+// CommandRequest specifies a command to dispatch to a service.
 type CommandRequest struct {
-	// Device is the target device name.
-	Device string
+	// Service is the target service name.
+	Service string
 	// Type is the command type string (e.g. "goto", "land").
 	Type string
 	// Data is the arbitrary JSON payload.
@@ -160,11 +160,11 @@ type CommandResult struct {
 	Message   string `json:"message"`
 }
 
-// AssistanceRequest is a pending help request sent by a device via
+// AssistanceRequest is a pending help request sent by a service via
 // client.RequestAssistance().
 type AssistanceRequest struct {
 	RequestID string
-	DeviceID  string
+	ServiceID string
 	Reason    string
 	Metadata  map[string]any
 	CreatedAt time.Time
@@ -250,8 +250,8 @@ func (o *OperatorClient) getToken() (string, error) {
 	return o.token, nil
 }
 
-// Devices lists all registered devices in the project.
-func (o *OperatorClient) Devices(ctx context.Context) ([]map[string]any, error) {
+// Services lists all registered services in the project.
+func (o *OperatorClient) Services(ctx context.Context) ([]map[string]any, error) {
 	token, err := o.getToken()
 	if err != nil {
 		return nil, err
@@ -290,8 +290,8 @@ func (o *OperatorClient) Query(ctx context.Context, req QueryRequest) ([]DataRow
 	}
 	q := url.Values{}
 	q.Set("project", o.cfg.Project)
-	if req.Device != "" {
-		q.Set("device", req.Device)
+	if req.Service != "" {
+		q.Set("device", req.Service)
 	}
 	if len(req.Keys) > 0 {
 		q.Set("keys", strings.Join(req.Keys, ","))
@@ -330,17 +330,17 @@ func (o *OperatorClient) Query(ctx context.Context, req QueryRequest) ([]DataRow
 }
 
 // Subscribe opens a WebSocket connection to the gateway and yields DataFrames
-// for the given device and stream types. Pass nil streams for all streams.
+// for the given service and stream types. Pass nil streams for all streams.
 // The returned channel is closed when ctx is cancelled or the connection drops.
-func (o *OperatorClient) Subscribe(ctx context.Context, device string, streams []string) (<-chan *DataFrame, error) {
+func (o *OperatorClient) Subscribe(ctx context.Context, service string, streams []string) (<-chan *DataFrame, error) {
 	token, err := o.getToken()
 	if err != nil {
 		return nil, err
 	}
 	q := url.Values{}
 	q.Set("project", o.cfg.Project)
-	if device != "" {
-		q.Set("vehicle", device)
+	if service != "" {
+		q.Set("vehicle", service)
 	}
 	if len(streams) > 0 {
 		q.Set("streams", strings.Join(streams, ","))
@@ -379,7 +379,7 @@ func (o *OperatorClient) Subscribe(ctx context.Context, device string, streams [
 			select {
 			case ch <- &DataFrame{
 				Timestamp: time.Unix(0, frame.TsNS),
-				Device:    frame.Device,
+				Service:   frame.Device,
 				Stream:    frame.Stream,
 				Fields:    frame.Fields,
 			}:
@@ -405,7 +405,7 @@ func (o *OperatorClient) SendCommand(ctx context.Context, req CommandRequest) (*
 		timeout = 30 * time.Second
 	}
 	body, _ := json.Marshal(map[string]any{
-		"vehicle_id":   req.Device,
+		"vehicle_id":   req.Service,
 		"command_type": req.Type,
 		"data":         req.Data,
 		"priority":     req.Priority,
@@ -483,7 +483,7 @@ func (o *OperatorClient) AssistanceRequests(ctx context.Context) (<-chan *Assist
 			}
 			ar := &AssistanceRequest{
 				RequestID: frame.RequestID,
-				DeviceID:  frame.Device,
+				ServiceID: frame.Device,
 				Reason:    frame.Reason,
 				Metadata:  frame.Metadata,
 				client:    o,

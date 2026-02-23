@@ -1,41 +1,45 @@
 """
-SystemScale SDK — W&B-style telemetry, alerting, and command interface.
+SystemScale SDK — telemetry, alerting, and command interface.
 
-Device-side usage::
+Service-side usage::
 
     import systemscale
 
-    client = systemscale.init(api_key="ssk_live_...", project="my-fleet", device="drone-001")
+    client = systemscale.init(
+        api_key  = "ssk_live_...",
+        project  = "my-fleet",
+        service  = "drone-001",
+        location = (28.61, 77.20, 102.3),  # optional default GPS
+    )
+
+    # Continuous time-series data (queued, background delivery)
     client.log({"sensors/temp": 85.2, "nav/altitude": 102.3})
+
+    # Discrete event
     client.alert("Low battery", level="warning", data={"pct": 12})
+
+    # Human-in-the-loop
     response = client.request_assistance("Obstacle detected", timeout=60)
 
+    # Receive operator instructions
     @client.on_command
     def handle(cmd):
-        cmd.ack()
-
-    # Route data to a specific actor (new in v0.2)
-    client.log({"nav/alt": 102.3}, to="operator:ground-control")
-    client.stream.send({"lat": 28.6}, to="operator:*")
+        if cmd.type == "goto":
+            navigate(cmd.data["lat"], cmd.data["lon"])
+            cmd.ack()
 
 Cloud-side (operator) usage::
 
     ops = systemscale.connect(api_key="ssk_live_...", project="my-fleet")
-    rows = ops.query(device="drone-001", keys=["sensors/temp"], start="-1h")
+    rows = ops.query(service="drone-001", keys=["sensors/temp"], start="-1h")
     ack  = ops.send_command("drone-001", cmd_type="goto", data={"lat": 28.6, "lon": 77.2})
 
     for req in ops.assistance_requests():
         req.approve("proceed")
 
     # Real-time subscription
-    for frame in ops.subscribe(device="drone-001"):
+    for frame in ops.subscribe(service="drone-001"):
         print(frame.fields)
-
-    # Standalone module usage (new in v0.2)
-    from systemscale.stream import StreamEmitter
-    emitter = StreamEmitter(api_key=KEY, project="my-fleet", actor="drone-001")
-    emitter.start()
-    emitter.send({"lat": 28.6}, to="operator:*")
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ from __future__ import annotations
 from .client   import Client, Command             # noqa: F401
 from .operator import OperatorClient              # noqa: F401
 
-# ── Module-level singleton (device side) ──────────────────────────────────────
+# ── Module-level singleton (service side) ─────────────────────────────────────
 
 _client: "Client | None" = None
 
@@ -51,41 +55,63 @@ _client: "Client | None" = None
 def init(
     api_key: str,
     project: str,
-    device:  str | None = None,
+    service: str | None = None,
     *,
-    api_base:       str  = "http://127.0.0.1:7777",
-    fleet_api:      str  = "https://api.systemscale.io",
-    apikey_url:     str  = "https://keys.systemscale.io",
-    queue_size:     int  = 8192,
-    auto_provision: bool = True,
+    location:   tuple[float, float, float] | None = None,
+    queue_size: int = 8192,
 ) -> "Client":
     """
-    Initialise the SDK for a device.
+    Initialise the SDK for a service.
 
-    The SDK probes the local edge agent (``localhost:7777/healthz``).  If the
-    agent is running the SDK uses it directly.  If not — and *auto_provision*
-    is True — the SDK provisions the device (writes config, starts the agent).
+    Minimal usage::
 
-    :param api_key:        SystemScale API key (``ssk_live_...``).
-    :param project:        Project name (slug), e.g. ``"my-fleet"``.
-    :param device:         Device / service name, e.g. ``"drone-001"``.
-    :param api_base:       Local agent API base URL (default ``http://127.0.0.1:7777``).
-    :param fleet_api:      Fleet API base URL (for provisioning).
-    :param apikey_url:     API-key service URL (for token exchange).
-    :param queue_size:     Background log queue depth.
-    :param auto_provision: Attempt to install and start the agent if not running.
-    :returns:              The initialised :class:`Client` singleton.
+        client = systemscale.init(
+            api_key = "ssk_live_...",
+            project = "my-fleet",
+            service = "drone-001",
+        )
+
+    With a default GPS location (used for every ``log()`` call unless overridden)::
+
+        client = systemscale.init(
+            api_key  = "ssk_live_...",
+            project  = "my-fleet",
+            service  = "drone-001",
+            location = (28.61, 77.20, 102.3),   # (lat, lon, alt_m)
+        )
+
+    The SDK automatically detects whether the SystemScale edge agent is
+    installed on this machine:
+
+    - **Agent found** — data is buffered locally and streamed to the cloud
+      via the agent's QUIC relay.  No URL configuration needed.
+    - **Agent not found** — the SDK runs in *agentless mode*: telemetry
+      frames queue in-process and are delivered once the agent starts.
+      A single warning is logged; no repeated errors.
+
+    **Self-hosting**: override cloud URLs via environment variables::
+
+        SYSTEMSCALE_API_BASE=http://127.0.0.1:7777
+        SYSTEMSCALE_FLEET_API=http://myserver:8080
+        SYSTEMSCALE_APIKEY_URL=http://myserver:8083
+
+    :param api_key:    SystemScale API key (``ssk_live_...``).
+    :param project:    Project slug, e.g. ``"my-fleet"``.
+    :param service:    Service name.  Defaults to ``$SYSTEMSCALE_SERVICE``
+                       env var or the system hostname.
+    :param location:   Default GPS coordinates ``(lat, lon, alt_m)`` attached
+                       to every ``log()`` call that does not provide its own.
+    :param queue_size: In-process log queue depth (frames beyond this are
+                       dropped with a warning, never blocking the caller).
+    :returns:          The initialised :class:`Client` singleton.
     """
     global _client
     _client = Client(
         api_key=api_key,
         project=project,
-        device=device,
-        api_base=api_base,
-        fleet_api=fleet_api,
-        apikey_url=apikey_url,
+        service=service,
+        location=location,
         queue_size=queue_size,
-        auto_provision=auto_provision,
     )
     _client.start()
     return _client
@@ -108,7 +134,7 @@ def connect(
     :param fleet_api:   Fleet API base URL.
     :param apikey_url:  API-key service URL (for token exchange).
     :param ws_url:      WebSocket gateway URL for real-time subscriptions.
-    :param command_api: Command REST API URL for sending commands to devices.
+    :param command_api: Command REST API URL for sending commands to services.
     :returns:           An :class:`OperatorClient`.
     """
     return OperatorClient(
@@ -121,7 +147,7 @@ def connect(
     )
 
 
-# ── Module-level convenience wrappers (backwards-compatible) ──────────────────
+# ── Module-level convenience wrappers ─────────────────────────────────────────
 
 def _require_client() -> "Client":
     if _client is None:
@@ -156,7 +182,7 @@ def alert(
     data:  dict | None = None,
     to:    str | None  = None,
 ) -> None:
-    """Send a non-blocking alert to the operator (module-level shortcut)."""
+    """Send a non-blocking alert event (module-level shortcut)."""
     _require_client().alert(message, level=level, data=data, to=to)
 
 

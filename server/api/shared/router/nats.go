@@ -152,6 +152,21 @@ func (r *NATSRouter) Subscribe(ctx context.Context, subject string, opts ...SubO
 	return ch, nil
 }
 
+// EnsureStream creates or updates a JetStream stream covering the given subjects.
+// Safe to call on every startup — CreateOrUpdateStream is idempotent.
+func (r *NATSRouter) EnsureStream(ctx context.Context, name string, subjects []string) error {
+	_, err := r.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:       name,
+		Subjects:   subjects,
+		Retention:  jetstream.LimitsPolicy,
+		Duplicates: 2 * time.Minute, // dedup window for exactly-once commands
+		MaxAge:     5 * time.Minute,
+		MaxMsgs:    100_000,
+		Storage:    jetstream.MemoryStorage,
+	})
+	return err
+}
+
 func (r *NATSRouter) Close() error {
 	r.nc.Close()
 	return nil

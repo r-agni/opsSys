@@ -2,17 +2,17 @@
 #
 # Usage:
 #   1. Build service images:
-#        docker compose -f deploy/docker/docker-compose.dev.yml build
+#        docker compose -f infra/docker/docker-compose.dev.yml build
 #
 #   2. Start infrastructure:
-#        docker compose -f deploy/docker/docker-compose.dev.yml up -d nats questdb cockroachdb keycloak
+#        docker compose -f infra/docker/docker-compose.dev.yml up -d nats questdb cockroachdb keycloak
 #        # Wait ~30s for CockroachDB and Keycloak to initialize
 #
 #   3. Start app services:
-#        docker compose -f deploy/docker/docker-compose.dev.yml up -d
+#        docker compose -f infra/docker/docker-compose.dev.yml up -d
 #
 #   4. Run the dashboard:
-#        cd dashboard && npm run dev   # → http://localhost:5173
+#        cd server/dashboard && npm run dev   # → http://localhost:5173
 #
 # After Keycloak starts, configure the realm via http://localhost:8180/admin
 #   Admin credentials: admin / admin
@@ -129,7 +129,7 @@ services:
   fleet:
     <<: *service-defaults
     build:
-      context: ../../api
+      context: ../../server/api
       dockerfile: fleet/Dockerfile
     ports:
       - "8080:8080"
@@ -138,7 +138,7 @@ services:
       DATABASE_URL: "postgresql://root@cockroachdb:26257/systemscale?sslmode=disable"
       JWKS_URLS: >-
         http://keycloak:8080/realms/systemscale/protocol/openid-connect/certs,
-        http://auth:8083/.well-known/jwks.json
+        http://auth:8083/v1/.well-known/jwks.json
       CORS_ALLOW_ORIGIN: "http://localhost:5173"
       RELAY_ADDR: "relay.systemscale.io:443"
       REGION_ID: "local-dev"
@@ -151,11 +151,13 @@ services:
         condition: service_completed_successfully
       keycloak:
         condition: service_healthy
+      auth:
+        condition: service_healthy
 
   query:
     <<: *service-defaults
     build:
-      context: ../../api
+      context: ../../server/api
       dockerfile: query/Dockerfile
     ports:
       - "8081:8081"
@@ -174,7 +176,7 @@ services:
   commands:
     <<: *service-defaults
     build:
-      context: ../../api
+      context: ../../server/api
       dockerfile: commands/Dockerfile
     ports:
       - "8082:8082"   # HTTP REST (browser clients)
@@ -183,7 +185,7 @@ services:
       GRPC_ADDR: ":9090"
       HTTP_REST_ADDR: ":8082"
       NATS_URL: "nats://nats:4222"
-      JWKS_URL: "http://keycloak:8080/realms/systemscale/protocol/openid-connect/certs"
+      JWKS_URL: "http://keycloak:8080/realms/systemscale/protocol/openid-connect/certs,http://auth:8083/v1/.well-known/jwks.json"
       CORS_ALLOW_ORIGIN: "http://localhost:5173"
       REGION_ID: "local-dev"
     depends_on:
@@ -191,11 +193,13 @@ services:
         condition: service_healthy
       keycloak:
         condition: service_healthy
+      auth:
+        condition: service_healthy
 
   auth:
     <<: *service-defaults
     build:
-      context: ../../api
+      context: ../../server/api
       dockerfile: auth/Dockerfile
     ports:
       - "8083:8083"
@@ -205,6 +209,12 @@ services:
       JWKS_URLS: "http://keycloak:8080/realms/systemscale/protocol/openid-connect/certs"
       CORS_ALLOW_ORIGIN: "http://localhost:5173"
       # SIGNING_KEY_PATH not set → generates ephemeral RSA key (fine for dev)
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8083/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     depends_on:
       cockroach-init:
         condition: service_completed_successfully
@@ -212,7 +222,7 @@ services:
   ingest:
     <<: *service-defaults
     build:
-      context: ../../api
+      context: ../../server/api
       dockerfile: ingest/Dockerfile
     environment:
       NATS_URL: "nats://nats:4222"
@@ -229,7 +239,7 @@ services:
     <<: *service-defaults
     build:
       context: ../..
-      dockerfile: deploy/docker/Dockerfile.relay
+      dockerfile: infra/docker/Dockerfile.relay
     ports:
       - "8084:8084"     # WebSocket (operator dashboard)
       - "9091:9091"     # Prometheus metrics

@@ -15,7 +15,7 @@ Standalone usage::
         ws_url     = "wss://ws.systemscale.io",
         fleet_api  = "https://api.systemscale.io",
     )
-    for frame in sub.receive(device="drone-001"):
+    for frame in sub.receive(service="drone-001"):
         print(frame.fields)
 """
 
@@ -38,7 +38,7 @@ logger = logging.getLogger("systemscale")
 @dataclass
 class DataFrame:
     """A real-time data frame received from the ws-gateway."""
-    device:    str
+    service:   str
     stream:    str
     timestamp: str
     fields:    dict[str, Any]
@@ -70,14 +70,14 @@ class StreamSubscriber:
     def receive(
         self,
         *,
-        device:     str | None       = None,
+        service:    str | None       = None,
         streams:    list[str] | None = None,
         from_actor: str | None       = None,
     ) -> Generator[DataFrame, None, None]:
         """
         Blocking generator yielding real-time frames from the ws-gateway.
 
-        :param device:     Device name to subscribe to (None = all in project).
+        :param service:    Service name to subscribe to (None = all in project).
         :param streams:    Stream types, e.g. ``["telemetry", "event"]``.
         :param from_actor: Only yield frames originating from this actor
                            (``"type:id"`` format, ``"device:*"`` for all devices).
@@ -90,9 +90,9 @@ class StreamSubscriber:
                 "Install with: pip install websocket-client"
             )
 
-        vehicle_ids = self._resolve_vehicle_ids(device)
+        vehicle_ids = self._resolve_vehicle_ids(service)
         if not vehicle_ids:
-            logger.warning("No devices found for project=%s device=%s", self._project, device)
+            logger.warning("No services found for project=%s service=%s", self._project, service)
             return
 
         sub_msg = json.dumps({
@@ -151,7 +151,7 @@ class StreamSubscriber:
                         continue
 
                 yield DataFrame(
-                    device    = data.get("vehicle_id", data.get("device", "")),
+                    service   = data.get("vehicle_id", data.get("device", "")),
                     stream    = data.get("type", "event"),
                     timestamp = str(data.get("ts", "")),
                     fields    = data,
@@ -161,7 +161,7 @@ class StreamSubscriber:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _resolve_vehicle_ids(self, device: str | None) -> list[str]:
+    def _resolve_vehicle_ids(self, service: str | None) -> list[str]:
         if not self._fleet_api:
             return []
         try:
@@ -172,8 +172,8 @@ class StreamSubscriber:
                 headers={"Authorization": f"Bearer {token}"},
             )
             devices = resp.get("devices", [])
-            if device:
-                return [d["id"] for d in devices if d.get("display_name") == device]
+            if service:
+                return [d["id"] for d in devices if d.get("display_name") == service]
             return [d["id"] for d in devices]
         except Exception as e:
             logger.warning("Failed to resolve vehicle IDs: %s", e)

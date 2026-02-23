@@ -207,12 +207,12 @@ func (e *StreamEmitter) postWithRetry(ctx context.Context, u string, body []byte
 	return false
 }
 
-// DeviceName returns the resolved device name (hostname fallback).
-func DeviceName(configured string) string {
+// ServiceName returns the resolved service name (hostname fallback).
+func ServiceName(configured string) string {
 	if configured != "" {
 		return configured
 	}
-	if d := os.Getenv("SYSTEMSCALE_DEVICE"); d != "" {
+	if d := os.Getenv("SYSTEMSCALE_SERVICE"); d != "" {
 		return d
 	}
 	if h, err := os.Hostname(); err == nil {

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name        = "systemscale"
 version     = "0.1.0"
-description = "SystemScale vehicle SDK — log telemetry and receive commands in 3 lines."
+description = "SystemScale vehicle SDK — log and receive data in 3 lines."
 readme      = "README.md"
 license     = { text = "Apache-2.0" }
 requires-python = ">=3.10"

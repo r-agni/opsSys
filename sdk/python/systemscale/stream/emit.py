@@ -85,11 +85,19 @@ class StreamEmitter:
     ) -> None:
         self._api_key   = api_key
         self._project   = project
-        self._actor     = actor or os.environ.get("SYSTEMSCALE_DEVICE") or socket.gethostname()
+        self._actor     = actor or os.environ.get("SYSTEMSCALE_SERVICE") or socket.gethostname()
         self._agent_api = agent_api.rstrip("/")
         self._queue:  queue.Queue = queue.Queue(maxsize=queue_size)
         self._thread: threading.Thread | None = None
         self._stopped = False
+        self._agentless: bool = False
+        self._warned_agentless: bool = False
+
+    def set_agentless(self, value: bool) -> None:
+        """Switch agentless mode on/off. Called by Client when agent availability changes."""
+        self._agentless = value
+        if not value:
+            self._warned_agentless = False
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -162,6 +170,21 @@ class StreamEmitter:
             if item is _STOP:
                 break
             assert isinstance(item, _Frame)
+
+            if self._agentless:
+                if not self._warned_agentless:
+                    logger.warning(
+                        "systemscale: agentless mode — frames queuing locally "
+                        "until the edge agent becomes available."
+                    )
+                    self._warned_agentless = True
+                try:
+                    self._queue.put_nowait(item)  # re-queue to preserve frames
+                except queue.Full:
+                    pass  # queue full warning is handled in send()
+                import time as _time; _time.sleep(0.1)
+                continue
+
             body_dict: dict[str, Any] = {
                 "data":       item.data,
                 "stream":     item.stream,

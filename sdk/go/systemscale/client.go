@@ -3,9 +3,9 @@
 // Usage:
 //
 //	client, err := systemscale.Init(systemscale.Config{
-//	    APIKey:  "ssk_live_...",
-//	    Project: "my-fleet",
-//	    Device:  "drone-001",
+//	    APIKey:   "ssk_live_...",
+//	    Project:  "my-fleet",
+//	    Service:  "drone-001",
 //	})
 //
 //	// Log — non-blocking, nested maps flattened to slash-separated keys
@@ -55,7 +55,7 @@ import (
 // Config
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Config holds initialisation options for the device SDK client.
+// Config holds initialisation options for the service SDK client.
 type Config struct {
 	// APIKey is the SystemScale API key (format: ssk_live_<base58>).
 	APIKey string
@@ -63,13 +63,13 @@ type Config struct {
 	// Project is the project/fleet name (e.g. "my-fleet").
 	Project string
 
-	// Device is the device name within the project (e.g. "drone-001").
-	// Defaults to SYSTEMSCALE_DEVICE env var, then os.Hostname().
-	Device string
+	// Service is the service name within the project (e.g. "drone-001").
+	// Defaults to SYSTEMSCALE_SERVICE env var, then os.Hostname().
+	Service string
 
-	// Mode controls how the client connects: "auto" (default), "device", or "cloud".
+	// Mode controls how the client connects: "auto" (default), "service", or "cloud".
 	// "auto" probes the local agent and auto-provisions if unreachable.
-	// "device" requires a running local agent (Init returns error if absent).
+	// "service" requires a running local agent (Init returns error if absent).
 	Mode string
 
 	// APIBase is the edge agent local API URL. Defaults to "http://127.0.0.1:7777".
@@ -96,12 +96,12 @@ func (c *Config) applyDefaults() {
 		c.APIBase = "http://127.0.0.1:7777"
 	}
 	c.APIBase = strings.TrimRight(c.APIBase, "/")
-	if c.Device == "" {
-		c.Device = os.Getenv("SYSTEMSCALE_DEVICE")
+	if c.Service == "" {
+		c.Service = os.Getenv("SYSTEMSCALE_SERVICE")
 	}
-	if c.Device == "" {
+	if c.Service == "" {
 		if h, err := os.Hostname(); err == nil {
-			c.Device = h
+			c.Service = h
 		}
 	}
 	if c.APIKeyURL == "" {
@@ -327,7 +327,7 @@ func Init(cfg Config) (*Client, error) {
 	go c.runCommandListener()
 	cfg.Logger.Info("SystemScale SDK started",
 		"project", cfg.Project,
-		"device", cfg.Device,
+		"service", cfg.Service,
 		"api", cfg.APIBase,
 	)
 	return c, nil
@@ -350,8 +350,8 @@ func (c *Client) ensureAgent() error {
 		return fmt.Errorf("edge agent not reachable at %s (mode=device)", c.cfg.APIBase)
 	}
 
-	c.cfg.Logger.Info("edge agent not detected — provisioning device",
-		"project", c.cfg.Project, "device", c.cfg.Device)
+	c.cfg.Logger.Info("edge agent not detected — provisioning service",
+		"project", c.cfg.Project, "service", c.cfg.Service)
 
 	if err := c.provision(); err != nil {
 		return fmt.Errorf("auto-provisioning failed: %w", err)
@@ -426,7 +426,7 @@ func (c *Client) exchangeToken() (string, error) {
 }
 
 func (c *Client) provisionDevice(jwt string) (map[string]any, error) {
-	body, _ := json.Marshal(map[string]string{"display_name": c.cfg.Device})
+	body, _ := json.Marshal(map[string]string{"display_name": c.cfg.Service})
 	u := fmt.Sprintf("%s/v1/projects/%s/devices",
 		c.cfg.FleetAPI, url.PathEscape(c.cfg.Project))
 	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(body))

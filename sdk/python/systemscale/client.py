@@ -1,5 +1,5 @@
 """
-Device-side Client — thin facade over stream, message, and provision modules.
+Service-side Client — thin facade over stream, message, and provision modules.
 
 Not part of the public API; import via ``systemscale.init()``.
 """
@@ -16,6 +16,7 @@ from typing import Callable
 from .stream.emit      import StreamEmitter
 from .message.send     import MessageSender
 from .message.receive  import MessageReceiver, Command, AssistanceResponse  # noqa: F401
+from .core.transport   import _resolve_url
 
 logger = logging.getLogger("systemscale")
 
@@ -40,30 +41,28 @@ class Client:
 
     def __init__(
         self,
-        api_key:        str,
-        project:        str,
-        device:         str | None,
-        api_base:       str,
-        fleet_api:      str,
-        apikey_url:     str,
-        queue_size:     int,
-        auto_provision: bool,
+        api_key:    str,
+        project:    str,
+        service:    str | None,
+        location:   tuple[float, float, float] | None,
+        queue_size: int,
     ) -> None:
-        self._api_key        = api_key
-        self._project        = project
-        self._device         = device or os.environ.get("SYSTEMSCALE_DEVICE") or socket.gethostname()
-        self._api_base       = api_base.rstrip("/")
-        self._fleet_api      = fleet_api.rstrip("/")
-        self._apikey_url     = apikey_url.rstrip("/")
-        self._auto_provision = auto_provision
+        self._api_key          = api_key
+        self._project          = project
+        self._service          = service or os.environ.get("SYSTEMSCALE_SERVICE") or socket.gethostname()
+        self._default_location = location
+        self._api_base         = _resolve_url(None, "SYSTEMSCALE_API_BASE",   "http://127.0.0.1:7777")
+        self._fleet_api        = _resolve_url(None, "SYSTEMSCALE_FLEET_API",  "https://api.systemscale.io")
+        self._apikey_url       = _resolve_url(None, "SYSTEMSCALE_APIKEY_URL", "https://keys.systemscale.io")
+        self._agentless        = False
 
         # Sub-modules exposed as public attributes
         self.stream  = StreamEmitter(
-            api_key=api_key, project=project, actor=self._device,
+            api_key=api_key, project=project, actor=self._service,
             agent_api=self._api_base, queue_size=queue_size,
         )
         self.message = MessageSender(
-            api_key=api_key, project=project, actor=self._device,
+            api_key=api_key, project=project, actor=self._service,
             agent_api=self._api_base,
         )
         self.inbox   = MessageReceiver(agent_api=self._api_base)
@@ -79,22 +78,40 @@ class Client:
             return
         self._started = True
 
-        if not self._probe_agent():
-            if self._auto_provision:
-                self._provision()
+        agent_running = self._probe_agent()
+
+        if not agent_running:
+            if self._detect_agent_binary():
+                try:
+                    self._provision()
+                    agent_running = True
+                except Exception as e:
+                    logger.error(
+                        "Auto-provisioning failed: %s. Falling back to agentless mode.", e
+                    )
             else:
                 logger.warning(
-                    "Edge agent not found at %s and auto_provision=False. "
-                    "Logs will queue until the agent starts.",
-                    self._api_base,
+                    "systemscale-agent binary not found. Running in agentless mode. "
+                    "Frames will queue locally until the agent becomes available. "
+                    "Install the agent to enable full telemetry relay."
                 )
+
+        if not agent_running:
+            self._agentless = True
+            self.stream.set_agentless(True)
+            self.message.set_agentless(True)
+            self.inbox.set_agentless(True)
 
         self.stream.start()
         self.inbox.start()
         logger.info(
-            "SystemScale SDK started (project=%s, device=%s)",
-            self._project, self._device,
+            "SystemScale SDK started (project=%s, service=%s, mode=%s)",
+            self._project, self._service,
+            "agentless" if self._agentless else "agent",
         )
+
+        if self._agentless:
+            self._start_agent_retry()
 
     def stop(self) -> None:
         """Gracefully stop background threads and flush the log queue."""
@@ -123,6 +140,13 @@ class Client:
 
         :param to: Optional target actor ``"type:id"`` (e.g. ``"operator:*"``).
         """
+        if self._default_location is not None:
+            if lat == 0.0:
+                lat = self._default_location[0]
+            if lon == 0.0:
+                lon = self._default_location[1]
+            if alt == 0.0:
+                alt = self._default_location[2]
         self.stream.send(
             data, stream=stream, stream_name=stream_name,
             lat=lat, lon=lon, alt=alt, tags=tags, to=to,
@@ -204,13 +228,50 @@ class Client:
         except Exception:
             return False
 
+    @staticmethod
+    def _detect_agent_binary() -> bool:
+        """Return True if the systemscale-agent binary is present and executable."""
+        import shutil
+        explicit = os.environ.get("SYSTEMSCALE_AGENT_BIN", "").strip()
+        if explicit:
+            return os.path.isfile(explicit) and os.access(explicit, os.X_OK)
+        if shutil.which("systemscale-agent") is not None:
+            return True
+        for path in (
+            "/usr/local/bin/systemscale-agent",
+            os.path.expanduser("~/.local/bin/systemscale-agent"),
+            "/usr/bin/systemscale-agent",
+        ):
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return True
+        return False
+
     def _provision(self) -> None:
-        try:
-            from .provisioning import provision
-            provision(
-                api_key=self._api_key, project=self._project, device=self._device,
-                apikey_url=self._apikey_url, fleet_api=self._fleet_api,
-                agent_api=self._api_base,
-            )
-        except Exception as e:
-            logger.error("Auto-provisioning failed: %s", e)
+        from .provisioning import provision
+        provision(
+            api_key=self._api_key, project=self._project, service=self._service,
+            apikey_url=self._apikey_url, fleet_api=self._fleet_api,
+            agent_api=self._api_base,
+        )
+
+    def _start_agent_retry(self) -> None:
+        """Background thread: probe the agent every 30 s and switch out of agentless mode when found."""
+        import time
+
+        def _retry() -> None:
+            while not self._stopped:
+                time.sleep(30)
+                if self._stopped:
+                    break
+                if self._probe_agent():
+                    logger.info(
+                        "Edge agent now available at %s — switching to agent mode.",
+                        self._api_base,
+                    )
+                    self._agentless = False
+                    self.stream.set_agentless(False)
+                    self.message.set_agentless(False)
+                    self.inbox.set_agentless(False)
+                    break
+
+        threading.Thread(target=_retry, name="ss-agent-retry", daemon=True).start()

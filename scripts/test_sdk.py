@@ -3,13 +3,13 @@
 test_sdk.py — E2E test of the SystemScale Python SDK operator flow.
 
 Steps:
-  1. Keycloak ROPC → admin JWT
-  2. POST /v1/keys → create API key
-  3. systemscale.connect() → OperatorClient (handles token exchange internally)
-  4. ops.devices() → list fleet via GET /v1/projects/{name}/devices with SDK JWT
-  5. POST /v1/assistance → create test request (simulates device SDK call)
-  6. GET /v1/assistance → retrieve via SDK JWT
-  7. ops.send_command("drone-alpha") → resolves name→UUID → command-api → SSE
+  1. Keycloak ROPC -> admin JWT
+  2. POST /v1/keys -> create API key
+  3. systemscale.connect() -> OperatorClient (handles token exchange internally)
+  4. ops.devices() -> list fleet via GET /v1/projects/{name}/devices with SDK JWT
+  5. POST /v1/assistance -> create test request (simulates device SDK call)
+  6. GET /v1/assistance -> retrieve via SDK JWT
+  7. ops.send_command("drone-alpha") -> resolves name->UUID -> command-api -> SSE
      status=timeout is EXPECTED (no real edge agent in local dev)
 
 Prerequisites:
@@ -52,7 +52,11 @@ def _http(method, url, body=None, token=None):
         url, json.dumps(body).encode() if body else None, h, method=method)
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
-            return r.status, json.loads(r.read())
+            raw = r.read()
+            try:
+                return r.status, json.loads(raw)
+            except Exception:
+                return r.status, raw.decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
 
@@ -87,7 +91,7 @@ ok(f"Claims: org_id={claims.get('org_id')}, role={claims.get('role')}, email={cl
 # ── Step 2: Create API key ───────────────────────────────────────────────────
 step(2, "Create API key via apikey-service POST /v1/keys")
 status, key_resp = _http("POST", f"{APIKEY_URL}/v1/keys",
-                         {"name": f"e2e-test-{int(time.time())}", "scopes": ["operator"]},
+                         {"name": f"e2e-test-{int(time.time())}", "scopes": ["admin"]},
                          token=admin_jwt)
 if status != 201:
     fail(f"POST /v1/keys HTTP {status}: {key_resp}")
@@ -97,7 +101,7 @@ if not api_key.startswith("ssk_live_"):
     fail(f"Unexpected key format (expected ssk_live_...): {api_key[:24]}")
 
 # ── Step 3: systemscale.connect() ────────────────────────────────────────────
-step(3, "systemscale.connect() → OperatorClient")
+step(3, "systemscale.connect() -> OperatorClient")
 try:
     import systemscale
     ok(f"SDK imported from: {systemscale.__file__}")
@@ -114,18 +118,18 @@ ops = systemscale.connect(
 )
 ok(f"OperatorClient ready for project='{PROJECT_NAME}'")
 
-# ── Step 4: ops.devices() ────────────────────────────────────────────────────
-step(4, "ops.devices() → GET /v1/projects/{name}/devices")
-# SDK internally calls exchange_token(api_key, apikey_url) → JWT, then calls fleet-api
+# ── Step 4: ops.services() ───────────────────────────────────────────────────
+step(4, "ops.services() -> GET /v1/projects/{name}/devices")
+# SDK internally calls exchange_token(api_key, apikey_url) -> JWT, then calls fleet-api
 try:
-    devices = ops.devices()
+    devices = ops.services()
     ok(f"{len(devices)} device(s) returned")
     for d in devices:
         print(f"  - {d.get('display_name')} ({d.get('vehicle_type')}) id={d.get('id')}")
     if not devices:
         warn("No devices returned — did seed_fleet.py run? Fleet-api JWT auth might also be failing.")
 except Exception as e:
-    fail(f"ops.devices() raised: {e}")
+    fail(f"ops.services() raised: {e}")
 
 # ── Step 5: Simulate device assistance request ───────────────────────────────
 step(5, "Simulate device assistance request via POST /v1/assistance")
@@ -169,7 +173,7 @@ else:
 
 # ── Step 7: Send command ─────────────────────────────────────────────────────
 step(7, "ops.send_command('drone-alpha', cmd_type='test_ping') — timeout EXPECTED")
-print("  SDK resolves 'drone-alpha' → vehicle UUID via /v1/projects/{name}/devices")
+print("  SDK resolves 'drone-alpha' -> vehicle UUID via /v1/projects/{name}/devices")
 print("  Then POSTs to command-api /v1/commands and waits SSE on /v1/commands/{id}/stream")
 print("  Expected outcome: status='timeout' (no edge agent to ACK)")
 try:
@@ -188,7 +192,7 @@ try:
         warn(f"Unexpected status: {result.status!r}")
 except Exception as e:
     warn(f"send_command() raised: {e}")
-    warn("Check command-api logs: docker compose -f deploy/docker/docker-compose.dev.yml logs commands")
+    warn("Check command-api logs: docker compose -f infra/docker/docker-compose.dev.yml logs commands")
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 print(f"\n{'='*60}")

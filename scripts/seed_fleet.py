@@ -48,7 +48,11 @@ def _http(method, url, body=None, token=None):
         url, json.dumps(body).encode() if body else None, h, method=method)
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
-            return r.status, json.loads(r.read())
+            raw = r.read()
+            try:
+                return r.status, json.loads(raw)
+            except Exception:
+                return r.status, raw.decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
 

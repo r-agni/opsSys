@@ -23,8 +23,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # buf.yaml lives in proto/; generated code is written to:
-#   proto/gen/go/     (Go — used by api/ services)
-#   proto/gen/rust/   (Rust — used by agent/ + relay/ via prost-build)
+#   proto/gen/go/     (Go — used by server/api/ services)
+#   proto/gen/rust/   (Rust — used by agent/ + server/relay/ via prost-build)
 
 proto:
 	@echo "==> Generating protobuf code"
@@ -38,21 +38,21 @@ build:
 	@echo "==> Building agent (release)"
 	cargo build --release --manifest-path agent/Cargo.toml
 	@echo "==> Building relay (release)"
-	cargo build --release --manifest-path relay/Cargo.toml
+	cargo build --release --manifest-path server/relay/Cargo.toml
 
 build-debug:
 	@echo "==> Building agent (debug)"
 	cargo build --manifest-path agent/Cargo.toml
 	@echo "==> Building relay (debug)"
-	cargo build --manifest-path relay/Cargo.toml
+	cargo build --manifest-path server/relay/Cargo.toml
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Go services build
 # ─────────────────────────────────────────────────────────────────────────────
 
 build-api:
-	@echo "==> Building Go cloud services (api/)"
-	cd api && go build ./fleet/... ./query/... ./commands/... ./auth/... ./ingest/... ./video/...
+	@echo "==> Building Go cloud services (server/api/)"
+	cd server/api && go build ./fleet/... ./query/... ./commands/... ./auth/... ./ingest/... ./video/...
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Combined
@@ -88,11 +88,11 @@ test: test-rust test-go test-python
 test-rust:
 	@echo "==> Running Rust tests"
 	cargo test --manifest-path agent/Cargo.toml
-	cargo test --manifest-path relay/Cargo.toml
+	cargo test --manifest-path server/relay/Cargo.toml
 
 test-go:
-	@echo "==> Running Go tests (api/)"
-	cd api && go test ./fleet/... ./query/... ./commands/... ./auth/... ./ingest/...
+	@echo "==> Running Go tests (server/api/)"
+	cd server/api && go test ./fleet/... ./query/... ./commands/... ./auth/... ./ingest/...
 	@echo "==> Running Go tests (SDK)"
 	cd sdk/go && go test ./...
 
@@ -107,10 +107,10 @@ test-python:
 lint:
 	@echo "==> Rust: clippy"
 	cargo clippy --manifest-path agent/Cargo.toml -- -D warnings
-	cargo clippy --manifest-path relay/Cargo.toml -- -D warnings
+	cargo clippy --manifest-path server/relay/Cargo.toml -- -D warnings
 	@echo "==> Go: golangci-lint"
-	cd api    && golangci-lint run ./...
-	cd sdk/go && golangci-lint run ./...
+	cd server/api && golangci-lint run ./...
+	cd sdk/go     && golangci-lint run ./...
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Docker images (for relay and cloud services)
@@ -121,15 +121,15 @@ TAG      ?= latest
 
 docker-relay:
 	@echo "==> Building relay Docker image"
-	docker build -f deploy/docker/Dockerfile.relay \
+	docker build -f infra/docker/Dockerfile.relay \
 	    --build-arg TARGET=x86_64-unknown-linux-gnu \
 	    -t $(REGISTRY)/relay:$(TAG) .
 
 docker-api:
 	@echo "==> Building cloud service Docker images"
 	for svc in ingest commands fleet query auth; do \
-	    docker build -f api/$$svc/Dockerfile \
-	        -t $(REGISTRY)/$$svc:$(TAG) api; \
+	    docker build -f server/api/$$svc/Dockerfile \
+	        -t $(REGISTRY)/$$svc:$(TAG) server/api; \
 	done
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -152,18 +152,18 @@ build-agent-arm64:
 
 dev-up:
 	@echo "==> Starting local dev stack"
-	docker compose -f deploy/docker/docker-compose.dev.yml up -d
+	docker compose -f infra/docker/docker-compose.dev.yml up -d
 
 dev-down:
 	@echo "==> Stopping local dev stack"
-	docker compose -f deploy/docker/docker-compose.dev.yml down
+	docker compose -f infra/docker/docker-compose.dev.yml down
 
 dev-build:
 	@echo "==> Building dev Docker images"
-	docker compose -f deploy/docker/docker-compose.dev.yml build
+	docker compose -f infra/docker/docker-compose.dev.yml build
 
 dev-logs:
-	docker compose -f deploy/docker/docker-compose.dev.yml logs -f
+	docker compose -f infra/docker/docker-compose.dev.yml logs -f
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Clean
@@ -171,8 +171,8 @@ dev-logs:
 
 clean:
 	cargo clean --manifest-path agent/Cargo.toml
-	cargo clean --manifest-path relay/Cargo.toml
-	cd api    && go clean ./...
-	cd sdk/go && go clean ./...
+	cargo clean --manifest-path server/relay/Cargo.toml
+	cd server/api && go clean ./...
+	cd sdk/go     && go clean ./...
 	rm -rf $(SDK_DIST)
 	rm -rf proto/gen/
