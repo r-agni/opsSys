@@ -1,0 +1,138 @@
+.root {
+  padding: 32px;
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.memberRow {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--color-border-dim);
+}
+
+.memberRow:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--color-surface2);
+  border: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-text-dim);
+  flex-shrink: 0;
+}
+
+.memberInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.memberEmail {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.memberName {
+  font-size: 12px;
+  color: var(--color-text-dim);
+}
+
+.memberDevices {
+  font-size: 11px;
+  color: var(--color-text-dim);
+  margin-top: 2px;
+}
+
+.memberActions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.memberActions button {
+  font-size: 11px;
+  padding: 4px 10px;
+}
+
+.empty {
+  text-align: center;
+  color: var(--color-text-dim);
+  padding: 60px 20px;
+  font-size: 14px;
+}
+
+/* ── Form ────────────────────────────────────────────────────────────────── */
+
+.formRow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.formRow label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.formActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+/* ── Device picker ───────────────────────────────────────────────────────── */
+
+.devicePicker {
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface2);
+}
+
+.projectGroup {
+  padding: 6px 10px 2px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.deviceCheck {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.deviceCheck:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.deviceCheck input[type="checkbox"] {
+  width: auto;
+  accent-color: var(--color-accent);
+}

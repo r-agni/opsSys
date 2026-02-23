@@ -1,0 +1,179 @@
+/* ── Key reveal row ────────────────────────────────────────────────────────── */
+.newKey {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--color-surface2);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+.newKey code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-all;
+  flex: 1;
+  color: var(--color-green);
+}
+
+/* ── Setup guide card ──────────────────────────────────────────────────────── */
+.setupGuide {
+  background: var(--color-surface);
+  border: 1px solid var(--color-green);
+  border-radius: var(--radius);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.keyReveal {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.keyRevealLabel {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-green);
+}
+
+.divider {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 20px 0;
+}
+
+/* ── Steps ─────────────────────────────────────────────────────────────────── */
+.step {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 24px;
+}
+.step:last-of-type {
+  margin-bottom: 0;
+}
+
+.stepHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.stepNum {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.stepTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+.stepDesc {
+  font-size: 12px;
+  color: var(--color-text-dim);
+  margin: 0;
+  line-height: 1.6;
+}
+.stepDesc code {
+  font-family: var(--font-mono);
+  background: var(--color-surface2);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+/* ── Language tabs ─────────────────────────────────────────────────────────── */
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 0;
+}
+.tab {
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-dim);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  margin-bottom: -1px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tab:hover { color: var(--color-text); }
+.tabActive {
+  color: var(--color-accent);
+  border-bottom-color: var(--color-accent);
+}
+
+/* ── Code blocks ───────────────────────────────────────────────────────────── */
+.codeBlock {
+  position: relative;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  padding-top: 30px;
+}
+.codeBlock pre {
+  margin: 0;
+  overflow-x: auto;
+}
+.codeBlock code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--color-text);
+  white-space: pre;
+}
+.codeLang {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-dim);
+}
+.copyBtn {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  font-size: 11px;
+  padding: 3px 8px;
+  background: var(--color-surface2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-dim);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+.copyBtn:hover {
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+/* ── Dismiss ───────────────────────────────────────────────────────────────── */
+.dismissBtn {
+  margin-top: 20px;
+  align-self: flex-start;
+  font-size: 12px;
+  padding: 6px 14px;
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-dim);
+  cursor: pointer;
+}
+.dismissBtn:hover { color: var(--color-text); border-color: var(--color-text-dim); }

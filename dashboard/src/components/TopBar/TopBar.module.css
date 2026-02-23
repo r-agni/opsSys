@@ -1,0 +1,72 @@
+.topbar {
+  height: var(--topbar-height);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  flex-shrink: 0;
+}
+
+.title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.01em;
+}
+
+/* ── WebSocket status indicator ─────────────────────────────────────────────── */
+
+.wsStatus {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+}
+
+.wsLabel { color: var(--color-text-dim); }
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Connected — green pulsing dot */
+.connected { border-color: rgba(34,197,94,.2); background: rgba(34,197,94,.07); }
+.connected .dot {
+  background: var(--color-green);
+  box-shadow: 0 0 0 0 rgba(34,197,94,0.6);
+  animation: pulse-green 2s ease-out infinite;
+}
+.connected .wsLabel { color: var(--color-green); }
+
+/* Connecting — amber blinking dot */
+.connecting { border-color: rgba(245,158,11,.2); background: rgba(245,158,11,.07); }
+.connecting .dot {
+  background: var(--color-amber);
+  animation: blink 0.9s ease-in-out infinite;
+}
+.connecting .wsLabel { color: var(--color-amber); }
+
+/* Disconnected — grey */
+.disconnected { border-color: var(--color-border); background: transparent; }
+.disconnected .dot { background: var(--color-text-dim); opacity: 0.4; }
+
+@keyframes pulse-green {
+  0%   { box-shadow: 0 0 0 0 rgba(34,197,94,0.55); }
+  60%  { box-shadow: 0 0 0 5px rgba(34,197,94,0); }
+  100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}

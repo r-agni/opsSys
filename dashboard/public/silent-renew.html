@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <script>
+    // oidc-client-ts silent renew callback.
+    // The library opens this page in a hidden iframe with the auth response
+    // in the URL fragment/query. Posting the full URL back to the parent
+    // window lets oidc-client-ts complete the token exchange.
+    window.parent.postMessage(window.location.href, window.location.origin);
+  </script>
+</head>
+<body></body>
+</html>
