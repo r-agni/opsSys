@@ -1,0 +1,46 @@
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Build artifacts
+target/
+dist/
+build/
+*.o
+*.a
+*.so
+*.dll
+*.exe
+
+# Go
+vendor/
+go.sum
+
+# Node / dashboard
+node_modules/
+dashboard/dist/
+dashboard/.env*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+dist/
+.pytest_cache/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/
