@@ -1,0 +1,4 @@
+# Exclude pre-built Windows binaries and test artifacts
+*.exe
+*_test.go
+testdata/

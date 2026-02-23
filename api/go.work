@@ -1,0 +1,13 @@
+go 1.21
+
+use (
+	./auth
+	./commands
+	./fleet
+	./query
+	./shared/auth
+	./shared/router
+	./shared/storage
+	./ingest
+	./video
+)
