@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package systemscale.core.v1;
+
+option go_package = "github.com/systemscale/proto/core/v1;corev1";
+
+// StreamType identifies what kind of data is in a DataEnvelope payload.
+// Consumers use this to determine how to decode the opaque payload bytes.
+enum StreamType {
+  STREAM_TYPE_UNSPECIFIED = 0;
+  STREAM_TYPE_TELEMETRY   = 1;  // Sensor/state data (position, attitude, battery, etc.)
+  STREAM_TYPE_EVENT       = 2;  // Discrete events (arm, disarm, mode change, alert)
+  STREAM_TYPE_SENSOR      = 3;  // High-bandwidth sensor data (LiDAR, radar, thermal)
+  STREAM_TYPE_VIDEO_META  = 4;  // SRT session metadata (not the video bitstream itself)
+  STREAM_TYPE_LOG         = 5;  // Flight logs, debug output
+  STREAM_TYPE_AUDIO       = 6;  // Raw audio frames: PCM or Opus-encoded bytes
+}
+
+// Priority for CommandEnvelope. Higher priority commands are routed ahead of queued normal commands.
+enum Priority {
+  PRIORITY_UNSPECIFIED = 0;
+  PRIORITY_NORMAL      = 1;
+  PRIORITY_HIGH        = 2;
+  PRIORITY_EMERGENCY   = 3;  // Pre-empts any in-flight command; relay delivers immediately
+}
+
+// Ack is returned by the vehicle to confirm command execution.
+message CommandAck {
+  string command_id  = 1;  // Matches CommandEnvelope.command_id
+  string vehicle_id  = 2;
+  AckStatus status   = 3;
+  string message     = 4;  // Human-readable detail on failure
+  uint64 ack_time_ns = 5;  // Vehicle clock at moment of ACK
+}
+
+enum AckStatus {
+  ACK_STATUS_UNSPECIFIED = 0;
+  ACK_STATUS_ACCEPTED    = 1;  // Command received and executing
+  ACK_STATUS_COMPLETED   = 2;  // Command finished successfully
+  ACK_STATUS_REJECTED    = 3;  // Autopilot rejected the command (invalid state, etc.)
+  ACK_STATUS_FAILED      = 4;  // Command failed during execution
+  ACK_STATUS_TIMEOUT     = 5;  // No response from autopilot within deadline
+}

@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+package systemscale.telemetry.v1;
+
+option go_package = "github.com/systemscale/proto/telemetry/v1;telemetryv1";
+
+// TelemetryFrame is the payload format for DataEnvelope where type = STREAM_TYPE_TELEMETRY.
+// All fields use sint32/sint64 where the value is frequently small and can be delta-encoded.
+// Field numbers 1-15 = 1-byte tags (most common fields get lowest numbers).
+message TelemetryFrame {
+  // Attitude (roll/pitch/yaw) in millidegrees — sint32 because values are often near 0
+  sint32 roll_mdeg  = 1;  // Roll in 1/1000 degrees. ±180,000 max.
+  sint32 pitch_mdeg = 2;  // Pitch in 1/1000 degrees. ±90,000 max.
+  sint32 yaw_mdeg   = 3;  // Yaw in 1/1000 degrees. 0–360,000.
+
+  // Velocity in cm/s — sint32 because sign changes frequently
+  sint32 vx_cms = 4;  // North velocity, cm/s
+  sint32 vy_cms = 5;  // East velocity, cm/s
+  sint32 vz_cms = 6;  // Down velocity, cm/s (positive = descending)
+
+  // Battery
+  uint32 battery_mv      = 7;  // Battery voltage in millivolts
+  sint32 battery_current_ma = 8;  // Current draw in milliamps (negative = charging)
+  uint32 battery_pct     = 9;  // Remaining capacity 0-100
+
+  // Flight state
+  uint32 mode      = 10;  // Autopilot flight mode (autopilot-specific enum)
+  bool   armed     = 11;  // Whether motors are armed
+  uint32 gps_fix   = 12;  // GPS fix type (0=none, 1=2D, 2=3D, 3=RTK)
+  uint32 gps_sats  = 13;  // Number of GPS satellites in use
+  uint32 hdop_cm   = 14;  // Horizontal dilution of precision × 100
+  uint32 heading   = 15;  // Magnetic heading 0–35999 (1/100 degree)
+
+  // Altitude (supplement to envelope lat/lon/alt — higher precision)
+  sint32 alt_rel_mm = 16;  // Altitude relative to home, millimeters (for precision landing)
+  sint32 climb_cms  = 17;  // Climb rate cm/s (positive = ascending)
+
+  // RC / signal
+  uint32 rssi       = 18;  // Receiver signal strength 0-255
+  uint32 link_qual  = 19;  // Telemetry link quality 0-100 (%)
+}
+
+// EventFrame is the payload for DataEnvelope where type = STREAM_TYPE_EVENT.
+// Events are sparse (not high-frequency) and always persisted via JetStream.
+message EventFrame {
+  EventType event_type = 1;
+  string description   = 2;  // Human-readable detail
+  bytes metadata       = 3;  // Optional: additional serialized data (event-specific)
+}
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED   = 0;
+  EVENT_TYPE_ARMED         = 1;
+  EVENT_TYPE_DISARMED      = 2;
+  EVENT_TYPE_MODE_CHANGE   = 3;
+  EVENT_TYPE_TAKEOFF       = 4;
+  EVENT_TYPE_LANDING       = 5;
+  EVENT_TYPE_WAYPOINT      = 6;   // Reached a waypoint
+  EVENT_TYPE_RTL           = 7;   // Return-to-launch triggered
+  EVENT_TYPE_FAILSAFE      = 8;   // Failsafe condition triggered (comms loss, battery, etc.)
+  EVENT_TYPE_GEOFENCE      = 9;   // Geofence breach
+  EVENT_TYPE_BATTERY_LOW   = 10;
+  EVENT_TYPE_GPS_LOST      = 11;
+  EVENT_TYPE_CUSTOM        = 100; // Use description field for detail
+
+  // SDK-originated signals (values 101–110 reserved for human-in-the-loop events)
+  EVENT_TYPE_ALERT           = 101; // Non-blocking notification (payload = AlertFrame)
+  EVENT_TYPE_ASSISTANCE_REQ  = 102; // Device requests human decision (payload = AssistanceRequestFrame)
+  EVENT_TYPE_ASSISTANCE_RESP = 103; // Cloud responds to assistance request (payload = AssistanceResponseFrame)
+}
+
+// AlertFrame is the payload for EventType = EVENT_TYPE_ALERT.
+// Sent by the SDK via client.alert(); routed to operator WebSocket by ws-gateway.
+message AlertFrame {
+  string level    = 1;  // "info" | "warning" | "error" | "critical"
+  string message  = 2;  // Human-readable alert text
+  bytes  metadata = 3;  // Optional: arbitrary JSON blob with extra context
+}
+
+// AssistanceRequestFrame is the payload for EventType = EVENT_TYPE_ASSISTANCE_REQ.
+// Sent by the SDK via client.request_assistance(); the SDK call blocks until
+// a matching AssistanceResponseFrame is received as a CommandEnvelope.
+message AssistanceRequestFrame {
+  string request_id  = 1;  // UUIDv4 — correlates request ↔ response
+  string reason      = 2;  // Human-readable reason for requesting assistance
+  bytes  metadata    = 3;  // Optional: arbitrary JSON context
+  uint32 timeout_s   = 4;  // Max seconds the SDK will wait (0 = use server default)
+}
+
+// AssistanceResponseFrame is the payload in a CommandEnvelope delivered back to the device.
+// fleet-api publishes this as a command when operator calls POST /v1/assistance/{id}/respond.
+message AssistanceResponseFrame {
+  string request_id   = 1;  // Must match the originating AssistanceRequestFrame.request_id
+  bool   approved     = 2;  // true = proceed; false = deny / abort
+  string instruction  = 3;  // Free-text guidance from the operator (may be empty)
+}

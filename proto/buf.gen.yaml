@@ -1,0 +1,32 @@
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/systemscale/proto
+plugins:
+  # Go + gRPC code generation
+  - remote: buf.build/protocolbuffers/go
+    out: gen/go
+    opt:
+      - paths=source_relative
+  - remote: buf.build/grpc/go
+    out: gen/go
+    opt:
+      - paths=source_relative
+
+  # Rust code generation (prost + tonic)
+  - remote: buf.build/community/neoeinstein-prost
+    out: gen/rust/src
+  - remote: buf.build/community/neoeinstein-tonic
+    out: gen/rust/src
+
+  # TypeScript code generation (for dashboard SDK)
+  - remote: buf.build/bufbuild/es
+    out: gen/ts
+    opt:
+      - target=ts
+  - remote: buf.build/connectrpc/es
+    out: gen/ts
+    opt:
+      - target=ts

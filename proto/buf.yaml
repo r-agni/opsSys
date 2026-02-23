@@ -1,0 +1,13 @@
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - DEFAULT
+  except:
+    - PACKAGE_VERSION_SUFFIX   # We use v1 in package names, not in directory
+breaking:
+  use:
+    - FILE
+  except:
+    - FIELD_SAME_DEFAULT        # Allow adding defaults without breaking

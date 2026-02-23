@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package systemscale.command.v1;
+
+option go_package = "github.com/systemscale/proto/command/v1;commandv1";
+
+// Command payload schemas.
+// These are the well-known payload formats for CommandEnvelope.payload.
+// Custom vehicle types can define their own payload formats — the platform
+// treats CommandEnvelope.payload as opaque bytes and routes it unchanged.
+
+// MavlinkCommand wraps a MAVLink COMMAND_LONG for PX4/ArduPilot vehicles.
+// The MAVLink adapter on the edge agent decodes this and sends the native frame.
+message MavlinkCommand {
+  uint32 command   = 1;  // MAVLink command ID (e.g., 400 = MAV_CMD_COMPONENT_ARM_DISARM)
+  float  param1    = 2;
+  float  param2    = 3;
+  float  param3    = 4;
+  float  param4    = 5;
+  float  param5    = 6;
+  float  param6    = 7;
+  float  param7    = 8;
+}
+
+// MissionUpload uploads a complete waypoint mission to the vehicle.
+// The adapter translates this to MAVLink MISSION_ITEM_INT sequences.
+message MissionUpload {
+  repeated Waypoint waypoints = 1;
+  bool               loiter   = 2;  // Loop mission indefinitely after last waypoint
+}
+
+message Waypoint {
+  double  lat      = 1;
+  double  lon      = 2;
+  float   alt_m    = 3;  // Altitude in meters (relative to home unless abs_alt=true)
+  bool    abs_alt  = 4;  // If true, alt_m is absolute (AMSL). Default: relative to home.
+  float   speed    = 5;  // m/s approaching this waypoint (0 = use vehicle default)
+  uint32  hold_s   = 6;  // Seconds to loiter at waypoint before continuing (0 = pass through)
+}
+
+// SetMode changes the vehicle flight mode.
+message SetMode {
+  uint32 mode      = 1;  // Autopilot-specific mode ID
+  string mode_name = 2;  // Human-readable name (for display and audit log)
+}
+
+// ParameterSet updates a single autopilot parameter (MAVLink PARAM_SET).
+// Use carefully — most parameters take effect immediately and can destabilize the vehicle.
+message ParameterSet {
+  string name  = 1;  // MAVLink parameter name (up to 16 chars)
+  float  value = 2;
+}

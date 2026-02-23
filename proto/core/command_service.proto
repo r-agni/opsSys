@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package systemscale.core.v1;
+
+option go_package = "github.com/systemscale/proto/core/v1;corev1";
+
+import "core/envelope.proto";
+import "core/common.proto";
+
+// CommandService is the gRPC API for sending commands to vehicles.
+// Operators maintain a single bidirectional stream — all commands and ACKs
+// flow over this stream. HTTP/2 multiplexing means no per-command TCP overhead.
+service CommandService {
+  // SendCommand opens a bidirectional stream.
+  // Client sends CommandEnvelope messages; server streams back CommandAck messages.
+  // The stream stays open for the duration of the operator session.
+  rpc SendCommand(stream CommandEnvelope) returns (stream CommandAck);
+
+  // GetVehicleStatus opens a server-side stream that pushes live vehicle state
+  // at the autopilot's native rate (up to 50Hz). For real-time telemetry.
+  // Note: most operators should use the WebSocket gateway (lower overhead for
+  // browser dashboards). This is for server-to-server integrations.
+  rpc StreamTelemetry(TelemetryRequest) returns (stream DataEnvelope);
+}
+
+message TelemetryRequest {
+  repeated string vehicle_ids  = 1;  // Which vehicles to stream. Empty = all authorized.
+  repeated StreamType streams  = 2;  // Which stream types to include. Empty = all.
+  uint32 max_hz                = 3;  // Rate limit in Hz (0 = no limit, up to vehicle rate)
+}

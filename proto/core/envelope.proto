@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package systemscale.core.v1;
+
+option go_package = "github.com/systemscale/proto/core/v1;corev1";
+
+import "core/common.proto";
+
+// DataEnvelope is the universal data contract for ALL data moving through the system.
+//
+// CRITICAL: Field numbers 1-15 use 1-byte tags in protobuf encoding.
+// Fields 16+ use 2-byte tags. The 8 most frequently populated fields are
+// assigned 1-15 to minimize wire size on every message.
+//
+// NEVER change field numbers after the first production deployment.
+// Doing so breaks all stored data and all existing clients simultaneously.
+message DataEnvelope {
+  // --- Core routing fields (populated by every adapter, every message) ---
+  string     vehicle_id   = 1;  // Globally unique vehicle identifier (UUID v4)
+  uint64     timestamp_ns = 2;  // Nanosecond UTC epoch timestamp (vehicle clock)
+  StreamType type         = 3;  // Determines how payload bytes are interpreted
+  bytes      payload      = 4;  // Opaque bytes — format depends on StreamType
+
+  // --- Well-known position fields (populated when position is known) ---
+  // These allow relay/storage to route, filter, and geo-index without
+  // deserializing the opaque payload. Leave at zero if not applicable.
+  double lat = 5;  // WGS84 latitude  (-90.0 to +90.0)
+  double lon = 6;  // WGS84 longitude (-180.0 to +180.0)
+  float  alt = 7;  // Altitude in meters (WGS84 ellipsoid height)
+
+  // --- Sequencing (populated by edge agent, not by adapters) ---
+  uint32 seq = 8;  // Monotonically increasing per-vehicle sequence number.
+                   // Gaps in seq indicate dropped messages (useful for quality metrics).
+
+  // --- Optional metadata (populated when available, not on hot path) ---
+  string fleet_id    = 16;  // Project ID — logical grouping within an org (set by SDK / relay)
+  string org_id      = 17;  // Operator organization ID (filled by relay from cert claims)
+  string stream_name = 18;  // Custom stream label within a StreamType (e.g. "lidar_scan")
+
+  // --- Peer-to-peer actor routing (optional; empty = broadcast within project) ---
+  // These fields allow point-to-point messaging between actors in the same project:
+  //   device, operator, service, human — any combination can communicate.
+  // The relay uses receiver_id to route to the correct WebSocket session or QUIC stream.
+  // Leave empty for standard broadcast telemetry (the common case).
+  string sender_id    = 19;  // Actor sending: device_id, user_id, or service_id
+  string sender_type  = 20;  // "device" | "operator" | "service" | "human"
+  string receiver_id  = 21;  // Target actor; empty = broadcast within project
+  string receiver_type = 22; // "device" | "operator" | "service" | "human"
+}
+
+// CommandEnvelope carries operator commands to a specific vehicle.
+// Commands travel cloud → relay → vehicle over QUIC stream 1 (dedicated, ACK-required).
+message CommandEnvelope {
+  string   vehicle_id  = 1;  // Target vehicle
+  string   command_id  = 2;  // UUIDv7 — used for exactly-once deduplication.
+                              // The relay deduplicates by this ID within a 2-minute window.
+  bytes    payload     = 3;  // Opaque command bytes. Format agreed by adapter + operator SDK.
+  Priority priority    = 4;  // Routing priority
+  string   issuer_id   = 5;  // Operator user ID (from JWT sub claim, for audit log)
+  uint64   issued_at   = 6;  // Millisecond UTC epoch when command was issued
+  uint32   ttl_ms      = 7;  // Time-to-live in milliseconds. Relay discards if not delivered
+                              // within TTL. Default 0 = no expiry (use for mission uploads).
+                              // Use ~5000ms for real-time commands to avoid stale delivery.
+}
